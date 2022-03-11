@@ -477,6 +477,7 @@ tbl_errors
 ```
 
 -   The two models produce very similar results with `log(Lot.Area)` edging out `Lot.Area` in slope coefficient, and having a lower median and standard deviation of errors.
+-   Taking these factors into consideration, `log(Lot.Area)` is the better performing of the two models.
 -   Note however, `log(Lot.Area)` also produced the largest error and the distribution of errors is more heavily right-skewed.
 -   Both models show good predictive success for the mid-range where the bulk of the mass is, however both perform poorly in the tails.
 -   The model would need more work to remedy the tails, either by applying a correction where the predicted value is adjusted by some determined coefficient multiplied by the square of the distance between the observation and the median, or other variables need to be considered in the model.
