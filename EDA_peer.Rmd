@@ -1,0 +1,515 @@
+---
+title: "Peer Assessment I"
+output:
+  html_document: 
+    pandoc_args: --number-sections
+    highlight: pygments
+    theme: yeti
+    df_print: kable
+---
+
+First, let us load the data and necessary packages:
+
+```{r}
+# set defaults: cache chunks to speed compiling subsequent edits.
+knitr::opts_chunk$set(cache=TRUE, echo = TRUE)
+```
+
+```{r load, message=FALSE, warning=FALSE}
+load("ames_train.Rdata")
+library(MASS)
+library(BAS)
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+library(ggthemes)
+library(kableExtra)
+library(moments)
+library(RColorBrewer)
+```
+
+# 
+
+Make a labelled histogram (with 30 bins) of the ages of the houses in the data set, and describe the distribution.
+
+```{r Q1}
+house_ages <- ames_train %>% 
+    mutate(age_at_2010 = 2010 - Year.Built) %>%
+    select(age_at_2010) %>%
+    drop_na()
+
+mean_age <- mean(house_ages$age_at_2010)
+sd_age <- sd(house_ages$age_at_2010)
+plot_age <- house_ages %>% 
+    ggplot(aes(x=age_at_2010)) +
+    geom_histogram(
+        alpha = 0.8, 
+        bins = 30, 
+        aes(y = stat(density)),
+        position="identity", 
+        fill="orange", 
+        col="darkgrey") +
+    stat_function(
+        fun = dnorm, 
+        aes(colour = "Normal"), 
+        size = 1.2, 
+        alpha = 0.6,
+        args = list(mean = mean_age, sd = sd_age)) +
+    geom_line(
+        aes(y = ..density.., colour = "Observed"), 
+        stat = 'density', 
+        size = 1.5, 
+        alpha = 0.8) + 
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5), legend.position="bottom") +
+    scale_color_manual(name="Distribution", values=c(Normal="blue", Observed="red")) +
+    labs(title = "Age of Houses at 2010", y = "Proportion of Values", x="Age (years)")
+
+age_summary <- house_ages %>% 
+    summarise(
+        count=n(),
+        min=min(age_at_2010),
+        q25=quantile(age_at_2010, 0.25),
+        median=median(age_at_2010), 
+        q75=quantile(age_at_2010,0.75),
+        max=max(age_at_2010),
+        mean=round(mean(age_at_2010),2),
+        sd=round(sd(age_at_2010),2),
+        skew=round(skewness(age_at_2010),2)) %>%
+    kbl() %>% 
+    kable_styling(bootstrap_options = c("condensed"))
+```
+
+------------------------------------------------------------------------
+
+::: columns
+::: {.column width="55%"}
+```{r plot_age, echo=FALSE, fig.height=4, fig.width=5}
+plot_age
+```
+:::
+
+::: {.column width="45%"}
+**Distribution Summary**
+
+```{r tg_summary, echo=FALSE}
+age_summary
+```
+
+-   There are 1000 observations with a range of 0 to 138 years.
+-   Distribution is multi-modal (2 prominent peaks with a smaller third).
+-   Highest peak of values is around 5-9 years.
+-   The H‑spread is 9 to 55 years old (inclusive).
+-   There is a high degree of variance shown by a standard deviation of 29.64.
+-   Despite a heavy right skew appearance, there is only a moderate skew of 0.66, possibly because of the large mass of observations in the central peak which is wider than the first and pulls both the mean and median to the right again.
+-   There will be an element of right-skew due to the fact that homes cannot be younger than 0 years.
+:::
+:::
+
+------------------------------------------------------------------------
+
+# 
+
+The mantra in real estate is "Location, Location, Location!" Make a graphical display that relates a home price to its neighborhood in Ames, Iowa. Which summary statistics are most appropriate to use for determining the most expensive, least expensive, and most heterogeneous (having the most variation in housing price) neighborhoods? Report which neighborhoods these are based on the summary statistics of your choice. Report the value of your chosen summary statistics for these neighborhoods.
+
+```{r Q2, message=FALSE, warning=FALSE}
+nei_colours <- colorRampPalette(brewer.pal(4, "PuOr"))(27)
+
+neighbourhood_price_variation <- ames_train %>% 
+    group_by(Neighborhood) %>% 
+    summarise(
+        Mean = mean(price)/1e5, 
+        Median = median(price)/1e5, 
+        Min = min(price)/1e5, 
+        Max = max(price)/1e5, 
+        SD = sd(price)/1e5, 
+        `H-Spread` = IQR(price)/1e5,
+        ) %>%
+    mutate(CV = SD/Mean) %>%
+    arrange(desc(SD)) %>%
+    mutate(Neighborhood = factor(Neighborhood, unique(Neighborhood))) %>%
+    arrange(desc(Neighborhood))
+
+nei_plot <- ames_train %>% 
+    select(Neighborhood, price) %>%
+    mutate(Neighborhood = factor(Neighborhood, neighbourhood_price_variation$Neighborhood)) %>% 
+    ggplot(aes(as.factor(Neighborhood), price/1e5), fill=Neighborhood) +
+    theme_minimal() +
+    geom_boxplot(aes(fill=Neighborhood)) +
+    geom_violin(aes(colour=Neighborhood), width=1.5, alpha=0.3) + 
+    coord_flip() +
+    theme(
+        plot.title = element_text(hjust = 0.5), 
+        legend.position="none", 
+        plot.caption = element_text(face="italic")
+        ) +
+    scale_color_manual(values = nei_colours) +
+    labs(
+        title = "Distribution of House Prices by Neighbourhood", 
+        caption = "Neighbourhoods listed in descending order of variability",
+        x = NULL, 
+        y="Price ($'00,000)"
+        )
+
+tbl <- neighbourhood_price_variation %>%
+    pivot_longer(-Neighborhood,names_to = "Measure", values_to = "vals") %>%
+    mutate(vals = round(vals,2)) %>%
+    arrange(desc(Neighborhood)) %>%
+    pivot_wider(names_from = "Neighborhood", values_from = "vals", names_sort = T)
+
+tbl1 <- tbl %>% select(1:15) %>%
+    kbl() %>% 
+    kable_styling(bootstrap_options = c("condensed"), full_width = F, font_size = 10, position = "left")
+
+tbl2 <- tbl %>% select(c(1,16:28)) %>%
+    kbl() %>% 
+    kable_styling(bootstrap_options = c("condensed"), full_width = F, font_size = 10, position = "left")
+```
+
+------------------------------------------------------------------------
+
+```{r nei_plot, echo=FALSE, fig.width=10, message=FALSE, warning=FALSE}
+nei_plot
+```
+
+**Distribution of Neighbourhood Prices in Order of Variability (\$'00,000)**
+
+```{r tbl1, echo=FALSE}
+tbl1
+```
+
+```{r tbl2, echo=FALSE}
+tbl2
+```
+
+**Summary**
+
+Most Expensive:
+
+-   Stone Brook (Median \$341,000)
+-   Northridge Heights (Maximum \$615,000)
+
+Least Expensive:
+
+-   Meadow Village (Median \$86,000)
+-   Old Town (Minimum \$13,000)
+
+Most Heterogeneous:
+
+-   Stone Brook (Standard Deviation \$123,000, H-Spread \$151,000)
+-   Timberland (H-Spread \$151,000)
+-   Edwards (Coefficient of Variance 0.4)
+
+Note:
+
+-   Median has been used for most/least expensive rather than mean as it is more robust to outliers and skew.
+-   Coefficient of variance is calculated as $\sigma / \mu$, a measure of variability in proportion to the mean. It's useful for comparing the degree of variation from one data series to another, even if the means are drastically different from one another ([ref](https://www.investopedia.com/terms/c/coefficientofvariation.asp#:~:text=The%20coefficient%20of%20variation%20represents,drastically%20different%20from%20one%20another.)).
+
+------------------------------------------------------------------------
+
+# 
+
+Which variable has the largest number of missing values? Explain why it makes sense that there are so many missing values for this variable.
+
+```{r Q3}
+ames_train %>% 
+    summarise(across(everything(), ~ sum(is.na(.x)))) %>%
+    pivot_longer(everything(), names_to = "Variable") %>%
+    rename(NAs = value) %>%
+    slice_max(order_by = NAs, n=5)
+```
+
+------------------------------------------------------------------------
+
+Pool.QC has the highest count of NA's.
+
+From the codebook:
+
+    Pool QC (Ordinal): Pool quality
+            
+           Ex   Excellent
+           Gd   Good
+           TA   Average/Typical
+           Fa   Fair
+           NA   No Pool
+
+Each NA just represents a home without a pool.
+
+------------------------------------------------------------------------
+
+# 
+
+We want to predict the natural log of the home prices. Candidate explanatory variables are lot size in square feet (Lot.Area), slope of property (Land.Slope), original construction date (Year.Built), remodel date (Year.Remod.Add), and the number of bedrooms above grade (Bedroom.AbvGr). Pick a model selection or model averaging method covered in the Specialization, and describe how this method works. Then, use this method to find the best multiple regression model for predicting the natural log of the home prices.
+
+```{r Q4}
+df_base <- ames_train %>%
+    select(
+        price,
+        Lot.Area,
+        Land.Slope,
+        Year.Built,
+        Year.Remod.Add,
+        Bedroom.AbvGr
+        ) %>%
+    mutate(price = log(price)) %>%
+    drop_na()
+
+m_ames1 <- bas.lm(price ~ ., 
+                   data = df_base,
+                   prior = "ZS-null", 
+                   modelprior = uniform()
+)
+m_ames1
+
+ames.BPM1 = predict(m_ames1, estimator = "BPM", se.fit = TRUE)
+ames.BPM1$best.vars
+
+BPM1 = as.vector(
+    which.matrix(
+        m_ames1$which[ames.BPM1$best],
+        m_ames1$n.vars)
+    )
+ames.BPM1 = bas.lm(price ~ ., data = df_base,
+                    prior = "ZS-null",
+                    modelprior = uniform(),
+                    bestmodel = BPM1, n.models = 1)
+ames.BPM1.coef <- coef(ames.BPM1)
+ames.BPM1.coef
+
+par(mfrow = c(2, 3))
+plot(ames.BPM1.coef, subset = c(2:7))
+```
+
+------------------------------------------------------------------------
+
+**Initial Linear Model**
+
+The `bas.lm()` function from the `BAS` package is used:
+
+-   Zellner-Siow cauchy prior (`prior = "ZS-null"`) for the prior distributions of the coefficients in this regression.
+-   It's assumed all variables have an equal likelihood of being included in the final model using the uniform distribution `modelprior = uniform()`.
+-   Marginal Posterior Inclusion Probabilities are high for all variables.
+
+**Model Selection - Best Predictive Model**
+
+Since the purpose of the model is to predict future audience movie scores, the approach used is Best Predictive Model (BPM).
+
+-   BPM estimation with the \`predict\` function confirms that all variables are significant influencers for the model.
+-   Using the \`se.fit = TRUE\` option with \`predict\` we can calculate standard deviations for the predictions or for the mean. Then we can use this as input for the \`confint\` function for the prediction object.
+-   The option `estimator = "BPM"` is not yet available in `coef()`, so we need to extract a vector of zeros and ones representing which variables are included in the BPM model.
+-   Next, we will refit the model with `bas.lm` using the optional argument `bestmodel = BPM`.
+-   We will also specify that want to have 1 model by setting `n.models = 1`. In this way, `bas.lm` starts with the BPM and fits only that model.
+-   Since we have only one model in our new object representing the BPM, we can use the `coef` function to obtain the summaries.
+
+------------------------------------------------------------------------
+
+# 
+
+Which home has the largest squared residual in the previous analysis (Question 4)? Looking at all the variables in the data set, can you explain why this home stands out from the rest (what factors contribute to the high squared residual and why are those factors relevant)?
+
+```{r Q5, fig.height=5, fig.width=9}
+par(mfrow = c(1, 1))
+plot(
+    m_ames1, 
+    which = 1, 
+    add.smooth = F, 
+    ask = F, 
+    pch = 16, 
+    sub.caption="", 
+    caption="")
+
+n <- nrow(df_base)
+ames_k <- qnorm(0.5 + 0.5 * 0.95 ^ (1 / n))
+ames.lm <- lm(price ~ ., data = df_base)
+outliers <- Bayes.outlier(ames.lm, k = ames_k)
+max_outlier <- ames_train[which.max(outliers$prob.outlier),]
+max_outlier %>%
+    select(PID, price, Year.Built, Year.Remod.Add, area, Overall.Cond, Exterior.1st, 
+           Exter.Cond, Bsmt.Cond, BsmtFin.Type.1, Central.Air, Garage.Cond, Sale.Condition) %>%
+    kbl() %>% kable_styling(bootstrap_options = c("condensed"), font_size = 10)
+```
+
+------------------------------------------------------------------------
+
+The property with the highest $R^2$ value is observation 428 (Property ID 902207130).
+
+Sale Price was \$12,789, well below the median \$120,000 for that neighbourhood (Old Town).
+
+A number of factors might point to a cause (likely a combination of some or all of these):
+
+-   The house was built in 1923 and not refurbished since 1970 (40 years at the time of the data set). Both of these factors are shown to have strong impact on sale price in the model.
+-   The house has small area, it lies at approximately the 10^th^ percentile.
+-   Condition overall, and of the basement, garage and exterior, rate the second lowest possible score each.
+-   Exterior cladding is asbestos, a recognised health hazard and very expensive to remove and dispose of.
+-   Basement type is unfinished, i.e. suitable only for storage.
+-   There is no central air conditioning.
+-   Sale condition was abnormal (trade, foreclosure, short sale). It's possible this is a foreclosure, death estate, or perhaps the building is only good for demolition and sold for land value minus clearance costs.
+-   The last and simplest reason of course is that this could be a key entry error and a digit was missed from the sale price entry (perhaps the actual sale price was \$127,890).
+
+------------------------------------------------------------------------
+
+# 
+
+Use the same model selection method you chose in Question 4 to again find the best multiple regression model to predict the natural log of home prices, but this time **replacing Lot.Area with log(Lot.Area)**. Do you arrive at a model including the same set of predictors?
+
+```{r Q6, fig.height=2.5, fig.width=9}
+df_base <- ames_train %>%
+    select(
+        price,
+        Lot.Area,
+        Land.Slope,
+        Year.Built,
+        Year.Remod.Add,
+        Bedroom.AbvGr
+        ) %>%
+    mutate(price = log(price), Lot.Area = log(Lot.Area)) %>%
+    drop_na()
+
+m_ames2 <- bas.lm(price ~ ., 
+                   data = df_base,
+                   prior = "ZS-null", 
+                   modelprior = uniform()
+)
+m_ames2
+
+ames.BPM2 = predict(m_ames2, estimator = "BPM", se.fit = TRUE)
+ames.BPM2$best.vars
+
+BPM2 = as.vector(
+    which.matrix(
+        m_ames2$which[ames.BPM2$best],
+        m_ames2$n.vars)
+    )
+ames.BPM2 = bas.lm(price ~ ., data = df_base,
+                    prior = "ZS-null",
+                    modelprior = uniform(),
+                    bestmodel = BPM2, n.models = 1)
+ames.BPM2.coef <- coef(ames.BPM2)
+ames.BPM2.coef
+
+par(mfrow = c(1, 4))
+plot(ames.BPM2.coef, subset = c(2, 5:7))
+
+```
+
+------------------------------------------------------------------------
+
+The revised model no longer includes `Land.Slope`. This was the weakest variable in the previous model.
+
+------------------------------------------------------------------------
+
+# 
+
+Do you think it is better to log transform Lot.Area, in terms of assumptions for linear regression? Make graphs of the predicted values of log home price versus the true values of log home price for the regression models selected for Lot.Area and log(Lot.Area). Referencing these two plots, provide a written support that includes a quantitative justification for your answer in the first part of question 7.
+
+```{r Q7, message=FALSE, warning=FALSE}
+prices <- tibble(
+        Observed = log(ames_train$price), 
+        `Lot Area` = fitted(ames.BPM1), 
+        `Log Lot Area` = fitted(ames.BPM2)
+    ) %>% 
+    pivot_longer(
+        cols = c(`Lot Area`,`Log Lot Area`), 
+        values_to = "Predicted", 
+        names_to = "Model"
+    ) %>%
+    filter(Observed != min(Observed)) %>%
+    mutate(Errors = Predicted - Observed) 
+
+plot_fitted <- prices %>%
+    ggplot(aes(x = Observed, y = Predicted, colour = Model)) +
+    geom_point(alpha = 0.4) +
+    geom_smooth(se = F, method = "lm", size = 1.2) +
+    theme_minimal() +
+    scale_color_manual(values = c("#80B1D3", "#B3DE69")) +
+    geom_abline(intercept = 0, slope = 1, size = 1, colour = "#FB8072") +
+    theme(plot.title = element_text(hjust = 0.5), plot.caption = element_text(face="italic")) +
+    labs(
+        title = "Observed vs Predicted House Prices for Lot Area & Log of Lot Area Models", 
+        caption = "Red line represents actual values. Outlier 428 removed."
+    )
+
+plot_errors <- prices %>%
+    ggplot(aes(x = Observed, y = Errors, colour = Model)) +
+    geom_point(alpha = 0.4) +
+    geom_smooth(se = F, size = 1.2) +
+    theme_minimal() +
+    scale_color_manual(values = c("#80B1D3", "#B3DE69")) +
+    geom_hline(yintercept = 0) +
+    theme(plot.title = element_text(hjust = 0.5), plot.caption = element_text(face="italic")) +
+    labs(
+        title = "Errors of Predicted Values for Lot Area & Log of Lot Area Models", 
+        caption = "Outlier 428 removed."
+    )
+
+tbl_errors <- prices %>% 
+    group_by(Model) %>%
+    mutate(Errors = abs(Errors)) %>%
+    summarise(
+        mean=round(mean(Errors),2),
+        median=median(Errors), 
+        sd=round(sd(Errors),2),
+        max=max(Errors),
+        q25=quantile(Errors, 0.25),
+        q75=quantile(Errors,0.75),
+        skew=round(skewness(Errors),2)) %>%
+    kbl() %>% 
+    kable_styling(
+        bootstrap_options = c("condensed"),
+        full_width = F,
+        position = "left"
+        )
+```
+
+```{r plot_fitted, echo=FALSE, fig.height=5, fig.width=10, message=FALSE, warning=FALSE}
+plot_fitted
+```
+
+```{r plot_errors, echo=FALSE, fig.height=5, fig.width=10, message=FALSE, warning=FALSE}
+plot_errors
+```
+
+------------------------------------------------------------------------
+
+```{r tbl_errors, echo=FALSE}
+tbl_errors
+```
+
+-   The two models produce very similar results with `log(Lot.Area)` edging out `Lot.Area` in slope coefficient, and having a lower median and standard deviation of errors.
+-   Note however, `log(Lot.Area)` also produced the largest error and the distribution of errors is more heavily right-skewed.
+-   Both models show good predictive success for the mid-range where the bulk of the mass is, however both perform poorly in the tails.
+-   The model would need more work to remedy the tails, either by applying a correction where the predicted value is adjusted by some determined coefficient multiplied by the square of the distance between the observation and the median, or other variables need to be considered in the model.
+
+A rough approximation is to look at the far end of the tail on the errors. A distance of 1.5 from the median of ~12 gives an error of around 1.0. Square of the distance is 2.25 so the correction factor would be 1/2.25:
+
+```{r correction, fig.height=5, fig.width=10, message=FALSE, warning=FALSE}
+prices_median <- median(prices$Observed)
+prices %>% 
+    mutate(
+        correction = 
+            (Predicted + 
+                 ((1 - (!(Observed>prices_median))*2) *
+                      (1/2.25)*(Observed - prices_median)^2)) - Observed
+        )  %>%
+    ggplot(aes(x = Observed, y = correction, colour = Model)) +
+    geom_point(alpha = 0.4) +
+    geom_smooth(se = F, size = 1.2) +
+    theme_minimal() +
+    scale_color_manual(values = c("#80B1D3", "#B3DE69")) +
+    geom_hline(yintercept = 0) +
+    theme(plot.title = element_text(hjust = 0.5), plot.caption = element_text(face="italic")) +
+    labs(
+        title = "Errors of Corrected Predicted Values for Lot Area & Log of Lot Area Models", 
+        caption = "Outlier 428 removed.",
+    ) +
+    ylab("Errors for Corrected Predicted Values")
+```
+
+Already a much better performance on the tails. 
+
+------------------------------------------------------------------------
+
+\
+\
+\
+\
