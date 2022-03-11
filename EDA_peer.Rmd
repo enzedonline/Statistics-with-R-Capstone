@@ -84,7 +84,7 @@ age_summary <- house_ages %>%
 
 ::: columns
 ::: {.column width="55%"}
-```{r plot_age, echo=FALSE, fig.height=4, fig.width=5}
+```{r plot_age, echo=FALSE, fig.height=5, fig.width=5}
 plot_age
 ```
 :::
@@ -98,6 +98,7 @@ age_summary
 
 -   There are 1000 observations with a range of 0 to 138 years.
 -   Distribution is multi-modal (2 prominent peaks with a smaller third).
+-   The first peak will be related to a higher proportion of new builds.
 -   Highest peak of values is around 5-9 years.
 -   The H‑spread is 9 to 55 years old (inclusive).
 -   There is a high degree of variance shown by a standard deviation of 29.64.
@@ -168,7 +169,7 @@ tbl2 <- tbl %>% select(c(1,16:28)) %>%
 
 ------------------------------------------------------------------------
 
-```{r nei_plot, echo=FALSE, fig.width=10, message=FALSE, warning=FALSE}
+```{r nei_plot, echo=FALSE, fig.height=7, fig.width=10, message=FALSE, warning=FALSE}
 nei_plot
 ```
 
@@ -292,7 +293,7 @@ The `bas.lm()` function from the `BAS` package is used:
 
 **Model Selection - Best Predictive Model**
 
-Since the purpose of the model is to predict future audience movie scores, the approach used is Best Predictive Model (BPM).
+Since the purpose of the model is to predict future audience movie scores, the approach used is Best Predictive Model (BPM). This is the option whose predictions are closest to those given by the Bayesian model averaging model.
 
 -   BPM estimation with the \`predict\` function confirms that all variables are significant influencers for the model.
 -   Using the \`se.fit = TRUE\` option with \`predict\` we can calculate standard deviations for the predictions or for the mean. Then we can use this as input for the \`confint\` function for the prediction object.
