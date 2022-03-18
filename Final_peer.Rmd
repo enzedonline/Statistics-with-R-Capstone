@@ -2,9 +2,6 @@
 title: "Peer Assessment II"
 output:
   html_document: 
-    pandoc_args: [
-      "--number-sections",
-    ]
     highlight: pygments
     theme: yeti
     df_print: kable
@@ -18,6 +15,12 @@ As a statistical consultant working for a real estate investment firm, your task
 
 In order to better assess the quality of the model you will produce, the data have been randomly divided into three separate pieces: a training data set, a testing data set, and a validation data set. For now we will load the training data set, the others will be loaded and used later.
 
+```{r}
+# set defaults: cache chunks to speed compiling subsequent edits.
+knitr::opts_chunk$set(cache=TRUE, echo = TRUE)
+set.seed(123456)
+```
+
 ```{r load, message = FALSE}
 load("ames_train.Rdata")
 ```
@@ -26,106 +29,809 @@ Use the code block below to load any necessary packages
 
 ```{r packages, message = FALSE}
 library(statsr)
-library(dplyr)
 library(BAS)
+library(MASS)
+library(glmnet)
+library(ggplot2)
+library(ggthemes)
+library(kableExtra)
+library(RColorBrewer)
+library(tidyverse)
+library(moments)
+library(scales)
+library(broom)
 ```
 
 ## Part 1 - Exploratory Data Analysis (EDA)
 
-When you first get your data, it's very tempting to immediately begin fitting models and assessing how they perform.  However, before you begin modeling, it's absolutely essential to explore the structure of the data and the relationships between the variables in the data set.
+When you first get your data, it's very tempting to immediately begin fitting models and assessing how they perform. However, before you begin modeling, it's absolutely essential to explore the structure of the data and the relationships between the variables in the data set.
 
-Do a detailed EDA of the ames_train data set, to learn about the structure of the data and the relationships between the variables in the data set (refer to Introduction to Probability and Data, Week 2, for a reminder about EDA if needed). Your EDA should involve creating and reviewing many plots/graphs and considering the patterns and relationships you see. 
+Do a detailed EDA of the ames_train data set, to learn about the structure of the data and the relationships between the variables in the data set (refer to Introduction to Probability and Data, Week 2, for a reminder about EDA if needed). Your EDA should involve creating and reviewing many plots/graphs and considering the patterns and relationships you see.
 
 After you have explored completely, submit the three graphs/plots that you found most informative during your EDA process, and briefly explain what you learned from each (why you found each informative).
 
-* * *
+------------------------------------------------------------------------
 
-NOTE: Write your written response to part 1 here. Delete this note before you submit your work.
+> **Note for marking**: for the sake of readability, code required for transforming the data sets and producing the graphs has not been included inline. Any code to do with modelling etc. has been left inline.
 
-```{r creategraphs}
+All code used but not displayed can be found in the [Appendix].
+
+### 1.1 Distribution of Log of House Age at 2011
+
+In the first project, we examined the distribution of the ages of houses which showed a tri-modal distribution with a marked peak in the 5-9 bin. Looking at the skewness, median and mean however indicated that the bulk of the mass lay in the older houses.
+
+I wanted to revisit this and see if looking at the log of age would produce something more insightful and perhaps produce a more linear relationship with the log of sale price.
+
+Taking the exponential of the age values, the graph shows that there was a sustained growth in housing from 90 to around 30 years prior to 2011 - i.e. from the years 1920 to 1980, with a peak in the post war years at around 55 , i.e. 1950's. There followed quite a period of lull until a second, brief, peak at around 6 years, or 2005.
+
+Perhaps the main peak is a reflection of urbanisation of the mid-West during those years.
+
+The distribution, while still bimodal, is a much better fit to normal, although left skewed, and will be used for model considerations later.
+
+```{r creategraphs, echo=FALSE, fig.height=6, fig.width=10, message=FALSE, warning=FALSE}
+df_log.age <- data.frame(age = log(2011- ames_train$Year.Built)) 
+log.age.mu = mean(df_log.age$age)
+log.age.sd = sd(df_log.age$age)
+
+plot_age <- df_log.age %>% 
+    ggplot(aes(x=age)) +
+    geom_histogram(
+        alpha = 0.8, 
+        bins = 30, 
+        aes(y = stat(density, ..scaled..)),
+        position="identity", 
+        fill="orange", 
+        col="darkgrey") +
+    stat_function(
+        fun = dnorm, 
+        aes(colour = "Normal"), 
+        size = 1.2, 
+        alpha = 0.6,
+        args = list(
+            mean = log.age.mu, 
+            sd = log.age.sd
+            )
+        ) +
+    geom_line(
+        aes(y = ..density.., colour = "Observed"), 
+        stat = 'density', 
+        size = 1.5, 
+        alpha = 0.8) + 
+    theme_minimal() +
+    scale_color_manual(name="Distribution", values=c(Normal="blue", Observed="red")) +
+    theme(plot.title = element_text(hjust = 0.5), legend.position="bottom") +
+    labs(title = "Distribution of Log of House Age at 2011", y = "Density", x="Log of House Age")
+
+nei_colours <- colorRampPalette(brewer.pal(4, "Set1"))(27)
+
+plot_price_year <- ames_train %>% 
+    group_by(Neighborhood, Yr.Sold) %>%
+    summarise(Med = median(log(price)))  %>%   
+    ggplot(aes(x=Yr.Sold, y=Med, colour=Neighborhood)) +
+    geom_line(alpha = 0.8, size=1) +
+    theme_minimal() +
+    scale_color_manual(values = nei_colours)  +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    labs(
+        title = "Change in House Sales Prices by Year and Neighbourhood", 
+        y = "Log of Sales Price", 
+        x="Year"
+        )
+    
+# Calculate CV for each neighbourhood, create factor in descending order of CV 
+neighbourhood_price_variation <- ames_train %>% 
+    group_by(Neighborhood) %>% 
+    summarise(
+        Mean = mean(price)/1e5, 
+        SD = sd(price)/1e5
+        ) %>%
+    mutate(CV = SD/Mean) %>%
+    arrange(desc(CV)) %>%
+    mutate(Neighborhood = factor(Neighborhood, unique(Neighborhood))) %>%
+    arrange(desc(Neighborhood))
+
+nei_plot <- ames_train %>% 
+    select(Neighborhood, price) %>%
+    mutate(Neighborhood = factor(Neighborhood, neighbourhood_price_variation$Neighborhood)) %>% 
+    ggplot(aes(as.factor(Neighborhood), price/1e5), fill=Neighborhood) +
+    theme_minimal() +
+    geom_boxplot(aes(fill=Neighborhood)) +
+    geom_violin(aes(colour=Neighborhood), width=1.5, alpha=0.3) + 
+    coord_flip() +
+    theme(
+        plot.title = element_text(hjust = 0.5), 
+        legend.position="none", 
+        plot.caption = element_text(face="italic")
+    ) +
+    scale_color_manual(values = nei_colours) +
+    labs(
+        title = "Distribution of House Prices by Neighbourhood", 
+        caption = "Neighbourhoods listed in descending order of coefficient of variability",
+        x = NULL, 
+        y="Price ($'00,000)"
+    )
+
+plot_age
 ```
 
-* * *
+### 1.2 Change in House Sales Prices by Year and Neighbourhood
+
+There were 3 reasons for looking at this:
+
+1.  The sub-prime collapse happened in 2008, in many parts of the world, house prices took a dive (in my own town, prices dropped by up to two-thirds). I wanted to see if this was apparent in the Ames sales figures. There is no evidence in the data of any effect from the sub-prime collapse.
+
+2.  To see if there was a marked shift in prices overall for the time span covered by the data set. If so, it would need to be factored into any modelling as sales from different years would need adjusting before being able to be considered equally. Overall, prices from 2006 to 2010 seemed to be mostly static.
+
+3.  To see if there was any evidence of which neighbourhoods were showing increase, and which decrease over the period to gauge which might be better for investment. There is some movement, however caution is needed as some points may represent few observations:\
+    \
+    Clear Creek is worst performing (\$171K to \$129K) & perhaps Greens, which shows a sharp drop from 2009 to 2010.\
+    \
+    Timberland shows sustained strong growth over the entire period (\$180K to \$300K) and would most likely represent the best area for investment.
+
+```{r plot_price_year, echo=FALSE, fig.height=6, fig.width=10, message=FALSE, warning=FALSE}
+plot_price_year
+
+```
+
+### 1.3 Distribution of House Prices by Neighbourhood
+
+A little related to the previous graph, this is ideal for showing which neighbourhoods have the greatest variability in pricing. Variability (along with sales price trend) gives one of the best opportunities for investment since there is potential for buying undervalued property and selling at an over-valued price.
+
+The neighbourhoods are sorted most variable (by coefficient of variance) top to bottom.
+
+While standard deviation is useful, the quantity will inevitably be proportional to the mean of the value being measured (i.e. a variation of 5% is more in absolute dollar terms for higher prices than for lower). Coefficient of variance is calculated as $\sigma / \mu$, a measure of variability in proportion to the mean. It's useful for comparing the degree of variation from one data series to another, even if the means are drastically different from one another ([ref](https://www.investopedia.com/terms/c/coefficientofvariation.asp)).
+
+This helps to give an idea of how much house prices vary as proportion of their mean.
+
+Laying the violin plot over the boxplot helps to visualise where the weight of data points is in each suburb. Violins with a heavy left skew may be an indicator of good investment opportunities (more properties below the mean).
+
+Combined with CV, it's possible to identify opportunities in lower priced neighbourhoods where budget might allow for more properties to be included in the portfolio and therefore spread the risk while also increasing turnover.
+
+```{r nei_plot, echo=FALSE, fig.height=6, fig.width=10, message=FALSE, warning=FALSE}
+nei_plot
+```
+
+------------------------------------------------------------------------
 
 ## Part 2 - Development and assessment of an initial model, following a semi-guided process of analysis
 
 ### Section 2.1 An Initial Model
+
 In building a model, it is often useful to start by creating a simple, intuitive initial model based on the results of the exploratory data analysis. (Note: The goal at this stage is **not** to identify the "best" possible model but rather to choose a reasonable and understandable starting point. Later you will expand and revise this model to create your final model.
 
-Based on your EDA, select *at most* 10 predictor variables from “ames_train” and create a linear model for `price` (or a transformed version of price) using those variables. Provide the *R code* and the *summary output table* for your model, a *brief justification* for the variables you have chosen, and a *brief discussion* of the model results in context (focused on the variables that appear to be important predictors and how they relate to sales price).
+Based on your EDA, select *at most* 10 predictor variables from "ames_train" and create a linear model for `price` (or a transformed version of price) using those variables. Provide the *R code* and the *summary output table* for your model, a *brief justification* for the variables you have chosen, and a *brief discussion* of the model results in context (focused on the variables that appear to be important predictors and how they relate to sales price).
 
-* * *
+------------------------------------------------------------------------
 
-NOTE: Write your written response to section 2.1 here. Delete this note before you submit your work.
+The variables chosen follow from a mix of elicitation (prior knowledge that these factors influence house prices) and examining ANOVA outputs during EDA. I was also careful not to choose covariates.
 
-```{r fit_model}
+1.  `Neighborhood`: This was an obvious choice from both methods, neighbourhood has been shown in EDA plots to show great influence along with prior knowledge that there will always be neighbourhoods that attract a greater price than others.
+2.  `Overall.Qual`: The quality of a house will always be a strong influence on sale value. Closely related to `Overall.Cond` - as `Overall.Qual` has more factors, it's likely the better choice of the two for accuracy of prediction.
+3.  `House.Style`: Another variable related to aesthetics, style of house is usually an influencer.
+4.  `area`: The size of house will almost always affect sale price all other factors held equal. EDA showed a stronger linear relationship between the log of this variable and the log of price.
+5.  `Lot.Area`: Similar to the above, size of lot is usually a strong factor on sale value. Also as with area, EDA showed a stronger linear relationship between the log of this variable and the log of price.
+6.  `Year.Built`: newer builds will generally attract a higher sale value. There is the factor that some "classic" era houses also attract a higher price, however the EDA didn't show any significant evidence of this. Again, the log of the house age (calculated as `log(2011 - Year.Built)`) is used - the difference between a 2010 and 1990 house is more influential than between a 1910 and 1930 for example, it makes sense to compress the larger ages.
+7.  `Bedroom.AbvGr`: Although this variable didn't score highly in ANOVA tests, it's one of the most fundamental factors in standard house valuations and included for that reason.
+8.  `Full.Bath`: as per #7
+9.  `Kitchen.Qual`: as per #7
+10. `MS.Zoning`: This came out second strongest in EDA (after neighbourhood) and makes sense - the type of urban planning where the house is located is important with the low and medium density residential zones attracting better prices.
+
+**Summary:**
+
+-   All variables show significance with the log of price.
+-   Some neighbourhoods have great influence, some not. However, as the ANOVA table shows, overall, this variable has the strongest strong influence. Surprisingly, the more classic indicators of number of bedrooms and bathrooms are the weakest, although still within the probability for inclusion.
+-   Residuals have a median of 0.00468 with an IQR of 0.015.
+-   Adjusted R-squared: 0.8938 - 89.4% of the log of house price variation can be explained by this model.
+
+```{r transformation, message=FALSE, warning=FALSE, include=FALSE}
+# deal with factor NAs (either NA or empty string) - replace with 'NONE'
+replace_factor_na <- function(x){
+    x <- as.character(x)
+    x <- if_else((is.na(x) | (x=="")), 'NONE', x)
+    x <- as.factor(x)
+}
+df_train <- ames_train %>%
+    mutate_at(
+        vars(Alley, BsmtFin.Type.1, BsmtFin.Type.2, Bsmt.Qual, Bsmt.Cond, Bsmt.Exposure,
+             Fireplace.Qu, Garage.Type, Garage.Finish, Mas.Vnr.Type,
+             Garage.Qual, Garage.Cond, Pool.QC, Fence, Misc.Feature), 
+        replace_factor_na
+    ) 
+
+# drop month/year sold - doesn't help predict a sale value unless using it to adjust sale price
+df_train <- df_train %>% select(-Yr.Sold, -Mo.Sold)
+
+# drop utilities, only one value in whole db
+df_train <- df_train %>% select(-Utilities)
+
+#deal with continuous na's 
+
+# 48 observations miss garage age  due to not having a garage
+# for purposes of EDA, assume those values are the same as house age
+# revisit if garage age is significant influencer
+df_train <- df_train %>%
+    mutate(Garage.Yr.Blt = ifelse(is.na(Garage.Yr.Blt), Year.Built, Garage.Yr.Blt))
+
+# 1 in 7 are missing Lot.Frontage - EDA, found that
+# RLot.Frontage looks to be significant influencer
+# => strong liner relationship between area and frontage found (after removing outliers)
+# => replace NAs with calculated value from area
+# <30,000 represents roughly 98% of values
+df_train %>%
+    filter(Lot.Frontage>0 & Lot.Area<30000) %>%
+    ggplot(aes(x=Lot.Area, y=Lot.Frontage)) +
+    geom_point() +
+    geom_smooth(method = "lm")
+
+# find slope (given by covariance) and intercept
+slope <- function(x, y){
+    return(cov(x, y)/var(x))
+}
+
+intercept <- function(x, y, m){
+    b <- mean(y) - (m * mean(x))
+    return(b)
+}
+
+lf.parameters <- df_train %>%
+    filter(Lot.Frontage>0 & Lot.Area<30000) %>%
+    summarise(
+        slope = slope(Lot.Area, Lot.Frontage),
+        intercept = intercept(Lot.Area, Lot.Frontage, slope)
+    )
+
+# confirm with lm()
+lot.frontage.lm <- lm(Lot.Area ~ Lot.Frontage, 
+                      data = (df_train %>% filter(Lot.Frontage>0 & Lot.Area<20000)))
+summary(lot.frontage.lm)
+
+calc_frontage <- function(LotArea) {
+    lf.parameters$intercept + lf.parameters$slope * LotArea
+}
+
+df_train <- df_train %>%
+    mutate(Lot.Frontage = ifelse(is.na(Lot.Frontage), calc_frontage(Lot.Area), Lot.Frontage))
+
+# Mas.Vnr.Area relates to Masonry veneer. Those that have none will have 0.
+df_train <- df_train  %>%
+    replace_na(list(Mas.Vnr.Area=0))
+
+# Only two observations remain with NAs - for the sake of EDA, set these to 0 also
+df_train <- df_train  %>%
+    replace(is.na(.), 0)
+
+# Perform a basic ANOVA to find influencers to use on outlier test
+ames.lm <- lm(log(price) ~ ., data = df_train)
+ames_anova <- anova(ames.lm)
+potential_vars <- (
+        ames_anova %>%
+            rownames_to_column(var = "Variable") %>%
+            slice_max(`Pr(>F)`, n=10) 
+    )$Variable
+
+n <- nrow(df_train)
+ames_k <- qnorm(0.5 + 0.5 * 0.95 ^ (1 / n))
+ames.lm <- lm(log(price) ~ ., data = (df_train %>% select(price, all_of(potential_vars))))
+outliers <- BAS::Bayes.outlier(ames.lm, k = ames_k)
+head(sort(outliers$prob.outlier, decreasing=TRUE), 5)
+
+# 3 observations can be counted as outlier
+df_train$outlier = outliers$prob.outlier
+
+df_train %>%
+    filter(outlier>0.975) %>%
+    select(PID, price, Year.Built, Year.Remod.Add, area, Overall.Cond, Exterior.1st, 
+           Exter.Cond, Bsmt.Cond, BsmtFin.Type.1, Central.Air, Garage.Cond, Sale.Condition) %>%
+    kbl() %>% kable_styling(bootstrap_options = c("condensed"), font_size = 10)
+
+#remove outliers from training dataset
+df_train <- df_train %>%
+    filter(!(PID %in% (df_train %>% filter(outlier>0.975))$PID))
+
+# filter sale.condition on normal then drop, only one value in whole db
+df_train <- df_train %>% 
+    filter(Sale.Condition == "Normal") %>%
+    select(-Sale.Condition)
+
 ```
 
-* * *
+```{r fit_model}
+df_model1 <- df_train %>%
+    mutate(log.price = log(price)) %>%
+    mutate(log.area = log(area)) %>%
+    mutate(log.lot.area = log(Lot.Area)) %>%
+    mutate(log.age = log(2011 - Year.Built)) %>%
+    mutate(remod.age = 2011 - Year.Remod.Add) %>%
+    select(-price, -PID, -area, -Lot.Area, -Year.Built, -Year.Remod.Add)
+
+df_model1 <- df_model1 %>% 
+    select(
+        log.price, Neighborhood, Overall.Qual, House.Style, log.area, 
+        log.lot.area, Bedroom.AbvGr, log.age, Full.Bath, Kitchen.Qual, MS.Zoning
+    )
+
+ames.lm <- lm(log.price ~ ., data = df_model1)
+summary(ames.lm) 
+ames_anova <- anova(ames.lm)
+ames_anova %>%
+    rownames_to_column(var = "Variable") %>%
+    arrange(`Pr(>F)`) %>%
+    kbl() %>% 
+    kable_styling(bootstrap_options = c("condensed"))
+
+```
+
+------------------------------------------------------------------------
 
 ### Section 2.2 Model Selection
 
 Now either using `BAS` another stepwise selection procedure choose the "best" model you can, using your initial model as your starting point. Try at least two different model selection methods and compare their results. Do they both arrive at the same model or do they disagree? What do you think this means?
 
-* * *
+------------------------------------------------------------------------
 
-NOTE: Write your written response to section 2.2 here. Delete this note before you submit your work.
+1.  Running BAS with a `ZS.null` prior and uniform model prior, then testing against the four predictor types (BMA, HPM, MPM & BPM).\
+    Concentrating on HPM (highest probability model), the selected model drops `Full.Bath` only.
+2.  Running a BIC test with stepAIC and `k = log(nrow(df_model1))` drops `Neighbourhood`, `Overall.Qual` and `Full.Bath`.
+3.  Running a Lasso test with glmnet drops `Full.Bath` only.
+
+Highest probability model finds the most likely model to have generated the data using a 0-1 loss L~0~.
+
+BIC is more selective and allows for more false-positive outcomes (where positive means accepts the null hypothesis that the variable is not an influencer).
+
+Lasso regression is a parsimonious model that performs L1 regularization. The L1 regularization adds a penalty equivalent to the absolute magnitude of regression coefficients and tries to minimize them.
 
 ```{r model_select}
+#-----------------------------------------
+# BAS Modelling
+#-----------------------------------------
+
+bas_ames.ZS <- bas.lm(log.price ~ ., 
+                  data = df_model1,
+                  prior = "ZS-null", 
+                  modelprior = uniform(),
+                  n.models=1000
+)
+
+models = data.frame(Estimator=character(), 
+                    Post.Prob=numeric(), 
+                    Vars=integer(),
+                    Best.Vars=character()
+                    )
+
+#BMA
+bas_ames.ZS.BMA = predict(bas_ames.ZS, estimator = "BMA")
+models <- models %>% add_row(
+    Estimator="BMA", 
+    Post.Prob=max(bas_ames.ZS$postprobs[1]), 
+    Vars=length(bas_ames.ZS.BMA$best.vars[-1]),
+    Best.Vars=toString(bas_ames.ZS.BMA$best.vars[-1])
+)
+
+#HPM
+bas_ames.ZS.HPM = predict(bas_ames.ZS, estimator = "HPM")
+models <- models %>% add_row(
+    Estimator="HPM", 
+    Post.Prob=max(bas_ames.ZS$postprobs[bas_ames.ZS.HPM$best]), 
+    Vars=length(bas_ames.ZS.HPM$best.vars[-1]),
+    Best.Vars=toString(bas_ames.ZS.HPM$best.vars[-1])
+)
+
+#MPM
+bas_ames.ZS.MPM = predict(bas_ames.ZS, estimator = "MPM", se.fit = T)
+models <- models %>% add_row(
+    Estimator="MPM", 
+    Post.Prob=NA, 
+    Vars=length(bas_ames.ZS.MPM$best.vars[-1]),
+    Best.Vars=toString(bas_ames.ZS.MPM$best.vars[-1])
+)
+
+#BPM
+bas_ames.ZS.BPM = predict(bas_ames.ZS, estimator = "BPM", se.fit = T)
+models <- models %>% add_row(
+    Estimator="BPM", 
+    Post.Prob=max(bas_ames.ZS$postprobs[bas_ames.ZS.HPM$best]), 
+    Vars=length(bas_ames.ZS.BPM$best.vars[-1]),
+    Best.Vars=toString(bas_ames.ZS.BPM$best.vars[-1])
+)
+
+models %>%
+    kbl() %>%
+    kable_styling(bootstrap_options = c("condensed"))
+
+#-----------------------------------------
+# stepAIC with BIC
+#-----------------------------------------
+BICk <- log(nrow(df_model1))
+m_ames_BIC1 <- lm(log.price ~ ., data = df_model1)
+ames.lm.BIC1 <- stepAIC(m_ames_BIC1, direction = "both", k = BICk)
+summary(ames.lm.BIC1)
+
+#-----------------------------------------
+# Lasso
+#-----------------------------------------
+x_vars <- model.matrix(log.price~. , df_model1)[,-1]
+lambda_seq <- 10^seq(2, -2, by = -.1)
+# Splitting the data into test and train
+ames.lm.cv <- cv.glmnet(x_vars, df_model1$log.price,
+                       alpha = 1, lambda = lambda_seq, 
+                       nfolds = 5)
+# identifying best lamda
+best_lam <- ames.lm.cv$lambda.min
+best_lam
+
+# Rebuilding the model with best lamda value identified
+ames.lasso <- glmnet(x_vars, df_model1$log.price, alpha = 1, lambda = best_lam)
+coef(ames.lasso)
+
+ames.lasso.pred <- predict(ames.lasso, s = best_lam, newx = x_vars)
+head(cbind(df_model1$log.price, ames.lasso.pred), 10)
+
 ```
 
-* * *
+------------------------------------------------------------------------
 
 ### Section 2.3 Initial Model Residuals
+
 One way to assess the performance of a model is to examine the model's residuals. In the space below, create a residual plot for your preferred model from above and use it to assess whether your model appears to fit the data well. Comment on any interesting structure in the residual plot (trend, outliers, etc.) and briefly discuss potential implications it may have for your model and inference / prediction you might produce.
 
-* * *
+------------------------------------------------------------------------
 
-NOTE: Write your written response to section 2.3 here. Delete this note before you submit your work.
+Below are plots for residuals for all three models for comparison. The HPM model will be used moving forwards from here as it is the best performing.
 
-```{r model_resid}
+The second plot adjusts the axes to remove the upper and lower 1% of values from display to allow a better visual representation and zoom in on where the bulk of the data lies.
+
+All three models perform reasonably well within the H-spread (± 1 standard deviation represented by the area between the dotted lines). Below that, the models over-predict and, conversely, for upper prices the models all under-predict. If this problem persists after the full model, a correction factor scaled as a square of the distance from the mean can be useful. This might be tricky given the double flex characteristic of a quadratic formula.
+
+Earlier testing with all sales conditions included produced some extreme residuals of \$300K+. After removing non-normal sales, the model accuracy improved greatly.
+
+```{r model_resid, echo=FALSE, fig.height=6, fig.width=10, message=FALSE, warning=FALSE}
+residuals <- tibble(
+    Observed = df_train$price/1e5,
+    Predicted.HPM = as.numeric(bas_ames.ZS.HPM$Ypred[1,]),
+    Predicted.BIC = as.numeric(ames.lm.BIC1$fitted.values),
+    Predicted.Lasso = as.numeric(ames.lasso.pred)
+    ) %>%
+    mutate(Predicted.HPM = exp(Predicted.HPM)/1e5) %>%
+    mutate(Predicted.BIC = exp(Predicted.BIC)/1e5) %>%
+    mutate(Predicted.Lasso = exp(Predicted.Lasso)/1e5) %>%
+    mutate(HPM = Observed - Predicted.HPM) %>%
+    mutate(BIC = Observed - Predicted.BIC)  %>% 
+    mutate(Lasso = Observed - Predicted.Lasso)  %>% 
+    pivot_longer(
+        cols = c(Lasso, BIC, HPM), 
+        values_to = "Residual", 
+        names_to = "Model"
+    ) %>% 
+    mutate(Model = factor(Model, levels = c("Lasso", "BIC", "HPM")))
+
+price.mu = mean(df_train$price)/1e5
+price.sd = sd(df_train$price)/1e5
+g_res <- residuals %>%
+    ggplot(aes(x = Observed, y = Residual, colour = Model)) +
+    geom_hline(yintercept = 0) +
+    geom_vline(xintercept = price.mu, linetype="longdash", alpha=0.5) +
+    geom_vline(xintercept = price.mu-price.sd, linetype="dotted", alpha=0.4, size=1) +
+    geom_vline(xintercept = price.mu+price.sd, linetype="dotted", alpha=0.4, size=1) +
+    geom_point(alpha = 0.3, size=2) +
+    geom_smooth(se = F, size = 1.2) +
+    theme_minimal() +
+    scale_color_manual(values = c("#80B1D3", "#B3DE69", "#FF7F00")) +
+    theme(
+        plot.title = element_text(hjust = 0.5), 
+        plot.margin = margin(20,10,10,10)
+        ) +
+    labs(
+        title = "Residual vs Observed Values for BIC, Lasso and HPM Models ($'00,000)"
+    )
+
+residuals.train.HPM <- residuals %>% filter(Model=="HPM")
+price98 <- c(quantile(residuals.train.HPM$Observed, .01), quantile(residuals.train.HPM$Observed, .99))
+res98 <- c(quantile(residuals.train.HPM$Residual, .01), quantile(residuals.train.HPM$Residual, .99))
+
+g_res
+g_res + coord_cartesian(xlim=price98, ylim = res98) +
+    labs(
+        caption = "Axes cropped to show middle 98% of test data in both directions."
+    )
+
+    
 ```
 
-* * *
+------------------------------------------------------------------------
 
 ### Section 2.4 Initial Model RMSE
 
 You can calculate it directly based on the model output. Be specific about the units of your RMSE (depending on whether you transformed your response variable). The value you report will be more meaningful if it is in the original units (dollars).
 
-* * *
+------------------------------------------------------------------------
 
-NOTE: Write your written response to section 2.4 here. Delete this note before you submit your work.
-
+The RMSE for the HPM model is \$22,506.54, the best of the 3 tried models.
 
 ```{r model_rmse}
+RMSE <- tibble(
+    Observed = df_train$price,
+    Predicted.HPM = as.numeric(bas_ames.ZS.HPM$Ypred[1,]),
+    Predicted.BIC = as.numeric(ames.lm.BIC1$fitted.values),
+    Predicted.Lasso = as.numeric(ames.lasso.pred)
+    ) %>%
+    mutate(Predicted.HPM = exp(Predicted.HPM)) %>%
+    mutate(Predicted.BIC = exp(Predicted.BIC)) %>%
+    mutate(Predicted.Lasso = exp(Predicted.Lasso)) %>%
+    mutate(HPM = Observed - Predicted.HPM) %>%
+    mutate(BIC = Observed - Predicted.BIC)  %>% 
+    mutate(Lasso = Observed - Predicted.Lasso)
+
+tibble(
+    `RMSE HPM____` = dollar_format()(sqrt(mean(RMSE$HPM^2))),
+    `RMSE BIC____` = dollar_format()(sqrt(mean(RMSE$BIC^2))),
+    `RMSE Lasso__` = dollar_format()(sqrt(mean(RMSE$Lasso^2)))
+       )
+
 ```
 
-* * *
+------------------------------------------------------------------------
 
-### Section 2.5 Overfitting 
+### Section 2.5 Overfitting
 
-The process of building a model generally involves starting with an initial model (as you have done above), identifying its shortcomings, and adapting the model accordingly. This process may be repeated several times until the model fits the data reasonably well. However, the model may do well on training data but perform poorly out-of-sample (meaning, on a dataset other than the original training data) because the model is overly-tuned to specifically fit the training data. This is called “overfitting.” To determine whether overfitting is occurring on a model, compare the performance of a model on both in-sample and out-of-sample data sets. To look at performance of your initial model on out-of-sample data, you will use the data set `ames_test`.
+The process of building a model generally involves starting with an initial model (as you have done above), identifying its shortcomings, and adapting the model accordingly. This process may be repeated several times until the model fits the data reasonably well. However, the model may do well on training data but perform poorly out-of-sample (meaning, on a dataset other than the original training data) because the model is overly-tuned to specifically fit the training data. This is called "overfitting." To determine whether overfitting is occurring on a model, compare the performance of a model on both in-sample and out-of-sample data sets. To look at performance of your initial model on out-of-sample data, you will use the data set `ames_test`.
 
 ```{r loadtest, message = FALSE}
 load("ames_test.Rdata")
 ```
 
-Use your model from above to generate predictions for the housing prices in the test data set.  Are the predictions significantly more accurate (compared to the actual sales prices) for the training data than the test data?  Why or why not? Briefly explain how you determined that (what steps or processes did you use)?
+```{r transformation_test, message=FALSE, warning=FALSE, include=FALSE}
+# deal with factor NAs (either NA or empty string) - replace with 'NONE'
+df_test <- ames_test %>%
+    mutate_at(
+        vars(Alley, BsmtFin.Type.1, BsmtFin.Type.2, Bsmt.Qual, Bsmt.Cond, Bsmt.Exposure,
+             Fireplace.Qu, Garage.Type, Garage.Finish, Mas.Vnr.Type,
+             Garage.Qual, Garage.Cond, Pool.QC, Fence, Misc.Feature), 
+        replace_factor_na
+    ) 
 
-* * *
+# drop utilities & sale.condition, only one value in whole db
+df_test <- df_test %>% select(-Utilities, -Sale.Condition)
 
-NOTE: Write your written response to section 2.5 here. Delete this note before you submit your work.
+# drop month/year sold - doesn't help predict a sale value unless using it to adjust sale price
+df_test <- df_test %>% select(-Yr.Sold, -Mo.Sold)
 
-```{r initmodel_test}
+#deal with continuous na's 
+
+# 48 observations miss garage age  due to not having a garage
+# for purposes of EDA, assume those values are the same as house age
+# revisit if garage age is significant influencer
+df_test <- df_test %>%
+    mutate(Garage.Yr.Blt = ifelse(is.na(Garage.Yr.Blt), Year.Built, Garage.Yr.Blt))
+
+# 1 in 7 are missing Lot.Frontage - EDA, found that
+# RLot.Frontage looks to be significant influencer
+# => strong liner relationship between area and frontage found (after removing outliers)
+# => replace NAs with calculated value from area
+# <30,000 represents roughly 98% of values
+
+df_test <- df_test %>%
+    mutate(Lot.Frontage = ifelse(is.na(Lot.Frontage), calc_frontage(Lot.Area), Lot.Frontage))
+
+# Mas.Vnr.Area relates to Masonry veneer. Those that have none will have 0.
+df_test <- df_test  %>%
+    replace_na(list(Mas.Vnr.Area=0))
+
+df_test <- df_test  %>%
+    replace(is.na(.), 0)
+
+# Perform a basic ANOVA to find influencers to use on outlier test
+ames.lm <- lm(log(price) ~ ., data = df_test)
+ames_anova <- anova(ames.lm)
+potential_vars <- (
+        ames_anova %>%
+            rownames_to_column(var = "Variable") %>%
+            slice_max(`Pr(>F)`, n=10) 
+    )$Variable
+
+n <- nrow(df_test)
+ames_k <- qnorm(0.5 + 0.5 * 0.95 ^ (1 / n))
+ames.lm <- lm(log(price) ~ ., data = (df_test %>% select(price, all_of(potential_vars))))
+outliers <- BAS::Bayes.outlier(ames.lm, k = ames_k)
+head(sort(outliers$prob.outlier, decreasing=TRUE), 5)
+
+# 3 observations can be counted as outlier
+df_test$outlier = outliers$prob.outlier
+
+#remove outliers from training dataset
+df_test <- df_test %>%
+    filter(!(PID %in% (df_train %>% filter(outlier>0.975))$PID))
+
+# Remove single entry for Landmrk neighbourhood as this does not exist in training model
+# Remove 2 entries with House.Style 2.5Fin not present in training model
+df_test <- df_test %>%
+    filter(Neighborhood != "Landmrk") %>%
+    filter(House.Style != "2.5Fin") %>%
+    droplevels()
+
 ```
 
-* * *
+```{r df_model2, include=FALSE}
+df_model2 <- df_test %>%
+    mutate(log.price = log(price)) %>%
+    mutate(log.area = log(area)) %>%
+    mutate(log.lot.area = log(Lot.Area)) %>%
+    mutate(log.age = log(2011 - Year.Built)) %>%
+    mutate(remod.age = 2011 - Year.Remod.Add) %>%
+    select(
+        log.price, Neighborhood, Overall.Qual, House.Style, log.area, 
+        log.lot.area, Bedroom.AbvGr, log.age, Full.Bath, Kitchen.Qual, MS.Zoning, -PID
+    )
+```
+
+Use your model from above to generate predictions for the housing prices in the test data set. Are the predictions significantly more accurate (compared to the actual sales prices) for the training data than the test data? Why or why not? Briefly explain how you determined that (what steps or processes did you use)?
+
+------------------------------------------------------------------------
+
+1.  A new `BAS` linear model was created using the model proposed by HPM (dropping only `Full.Bath`).
+2.  A new `pred.bas` object was created with fitted values using this model with the train and test data and the HPM estimator.
+
+Comparing data between train and test prediction, predictions for the training data are better than test. This was not the case before non-normal data was included in the model. The test data contains only normal sales conditions which is likely a good reason for the better fit prior to making this filter and re-modelling:
+
+-   The root mean squared error is slightly higher for the Test data (\$22.5K for Train vs \$24.0K).
+-   Mean and median of the residuals is slightly lower for Train than Test, standard deviation is identical.
+-   Maximum error for Train is \$172K vs \$197K. For the Test data, the maximum occurred at the extreme right tail, Train has a couple of outliers at around the \$400K mark. There are no outliers in the IQR as with the training data.
+-   IQR is slightly higher for Test.
+-   Both data sets are right-skewed, Train more so. The skewness comes from the larger residual errors in the more expensive housing.
+-   The training residuals are more centred around zero than the test data (median values are -\$117 and -\$4091 respectively). Both underestimate on average.
+-   The fit for residual means across sales price is more linear for the test data, particularly above the median.
+-   Both models deteriorate more than 1 standard deviation below the mean price, over-predicting the price increases below that point.
+
+Despite the slightly poorer residuals with the test data set, this is to be expected and gives no cause for concern with regards to applicability to other data sets.
+
+```{r initmodel_test_code, message=FALSE, warning=FALSE}
+HPM.intial <- as.vector(which.matrix(bas_ames.ZS$which[bas_ames.ZS.HPM$best],
+                              bas_ames.ZS$n.vars))
+
+model_initial <- bas.lm(log.price ~ ., data = df_model1,
+                      prior = "ZS-null",
+                      modelprior = uniform(),
+                      bestmodel = HPM.intial, n.models = 1)
+
+predict.train.initial <- predict(model_initial, newdata = df_model1, estimator = "HPM")
+predict.test.initial <- predict(model_initial, newdata = df_model2, estimator = "HPM")
+```
+
+```{r initmodel_test, echo=FALSE, fig.height=6, fig.width=10, message=FALSE, warning=FALSE}
+residuals.intial <- tibble(
+    Data = "Train",
+    Observed = df_train$price/1e5,
+    Predicted = as.numeric(predict.train.initial$Ypred[1,])
+) %>%
+    add_row(
+        Data = "Test",
+        Observed = df_test$price/1e5,
+        Predicted = as.numeric(predict.test.initial$Ypred[1,])
+    ) %>%
+    mutate(Predicted = exp(Predicted)/1e5) %>%
+    mutate(Residual = Observed - Predicted) 
+
+residuals.intial <- tibble(
+    Data = "Train",
+    Observed = df_train$price/1e5,
+    Predicted = as.numeric(predict.train.initial$Ypred[1,])
+) %>%
+    add_row(
+        Data = "Test",
+        Observed = df_test$price/1e5,
+        Predicted = as.numeric(predict.test.initial$Ypred[1,])
+    ) %>%
+    mutate(Predicted = exp(Predicted)/1e5) %>%
+    mutate(Residual = Observed - Predicted) 
+
+residuals.intial %>% 
+    mutate(Residual = (Residual)*1e5) %>%
+    group_by(Data) %>%
+    summarise(
+        RMSE=sqrt(mean(Residual^2)),
+        mean=round(mean(abs(Residual)),2),
+        median=median(abs(Residual)), 
+        sd=round(sd(abs(Residual)),2),
+        max=max(abs(Residual)),
+        q25=quantile(abs(Residual), 0.25),
+        q75=quantile(abs(Residual),0.75),
+        skew=round(skewness(Residual),2)) %>%
+    mutate(across(RMSE:q75, dollar_format())) %>%
+    kbl(
+        caption = "<center><h4><strong>Distribution of Absolute Residuals</strong></h4></center>",
+        escape = F
+    ) %>% 
+    kable_styling(bootstrap_options = c("condensed"))
+
+test.price98 <- c(quantile(residuals.intial$Observed, .01), quantile(residuals.intial$Observed, .99))
+test.res98 <- c(quantile(residuals.intial$Residual, .01), quantile(residuals.intial$Residual, .99))
+
+g_test_res <- residuals.intial %>%
+    ggplot(aes(x = Observed, y = Residual, colour=Data)) +
+    geom_vline(xintercept = price.mu, linetype="longdash", alpha=0.5) +
+    geom_vline(xintercept = price.mu-price.sd, linetype="dotted", alpha=0.4, size=1) +
+    geom_vline(xintercept = price.mu+price.sd, linetype="dotted", alpha=0.4, size=1) +
+    geom_point(alpha = 0.6, size=2) +
+    geom_smooth(se = F, size = 1.5) +
+    theme_minimal() +
+    geom_hline(yintercept = 0) +
+    scale_colour_manual(values=c("#33A02B", "#67a9d5")) +
+    theme(plot.title = element_text(hjust = 0.5), plot.margin = margin(20,10,30,10)) +
+    labs(
+        title = "Residual Values for HPM Model for Train and Test Data ($'00,000)",
+    ) + 
+    ylab("Residual") + xlab("Observed") 
+
+g_test_res
+g_test_res + coord_cartesian(xlim=test.price98, ylim = test.res98) +
+    labs(
+        caption = "Axes cropped to show middle 98% of test data in both directions."
+    )
+
+residual.mu = mean(residuals.intial$Residual)
+residual.sd = sd(residuals.intial$Residual)
+test.res99 <- c(quantile(residuals.intial$Residual, .005), quantile(residuals.intial$Residual, .995))
+
+residuals.intial %>%
+    ggplot(aes(x=Residual, fill=Data, colour=Data)) +
+    geom_histogram(
+        alpha = 0.3, 
+        bins = 30, 
+        aes(y = stat(density)),
+        position="identity", 
+        col="darkgrey"
+        ) +
+    geom_vline(
+        aes(xintercept = median(Residual[Data=="Test"]), color="Test"), 
+        size = 1.2, 
+        linetype="longdash"
+    ) + 
+    geom_vline(
+        aes(xintercept = median(Residual[Data=="Train"]), color="Train"), 
+        size = 1.2, 
+        linetype="longdash"
+    ) + 
+    stat_function(
+        fun = dnorm, 
+        aes(colour = "Normal"), 
+        size = 1.2, 
+        linetype="longdash",
+        args = list(
+            mean = residual.mu, 
+            sd = residual.sd
+        )
+    ) +
+    geom_line(
+        aes(y = ..density.., colour = Data), 
+        stat = 'density', 
+        size = 1.5
+        ) + 
+    theme_minimal() +
+    scale_fill_manual(values=c("Test" = "#33A02B", "Train" = "#1F78B4")) +
+    scale_colour_manual(
+        name="Density", 
+        values = c("Normal" = "#E3211C", "Test" = "#33A02B", "Train" = "#1F78B4")
+        ) + 
+    theme(
+        plot.title = element_text(hjust = 0.5), 
+        legend.position="bottom"
+        ) +
+    labs(
+        title = "Distribution of Train and Test Residuals Using HPM", 
+        caption = "NOTE: the x-axis has been trunctated at $100K in both directions due to the excessive tails.
+        Verticals represent median residuals for both data sets.",
+        y = "Density", x="Residual ($'00,000)"
+        ) + 
+    coord_cartesian(xlim=c(-1,1)) 
+
+```
+
+------------------------------------------------------------------------
 
 **Note to the learner:** If in real-life practice this out-of-sample analysis shows evidence that the training data fits your model a lot better than the test data, it is probably a good idea to go back and revise the model (usually by simplifying the model) to reduce this overfitting. For simplicity, we do not ask you to do this on the assignment, however.
 
 ## Part 3 Development of a Final Model
 
-Now that you have developed an initial model to use as a baseline, create a final model with *at most* 20 variables to predict housing prices in Ames, IA, selecting from the full array of variables in the dataset and using any of the tools that we introduced in this specialization.  
+Now that you have developed an initial model to use as a baseline, create a final model with *at most* 20 variables to predict housing prices in Ames, IA, selecting from the full array of variables in the dataset and using any of the tools that we introduced in this specialization.
 
 Carefully document the process that you used to come up with your final model, so that you can answer the questions below.
 
@@ -133,67 +839,194 @@ Carefully document the process that you used to come up with your final model, s
 
 Provide the summary table for your model.
 
-* * *
+------------------------------------------------------------------------
 
-NOTE: Write your written response to section 3.1 here. Delete this note before you submit your work.
-
+The following code selects the best variables and produces summary table (using `coef()`) for the final table.
 
 ```{r model_playground}
+# Drop 2 outliers found in initial model testing, remove any non-normal sales
+df_train <- df_train %>%
+    mutate(log.age = log(2011 - Year.Built)) %>%
+    mutate(log.remod.age = log(2011 - Year.Remod.Add)) %>%
+    filter(!(PID %in% c(908154205, 533350090)))
+
+df_test <- df_test %>%
+    mutate(log.age = log(2011 - Year.Built)) %>%
+    mutate(log.remod.age = log(2011 - Year.Remod.Add))
+
+# Drop colinear and other variable scoring low ANOVA during EDA tests
+df_model2 <- df_train %>%
+    mutate(log.price = log(price)) %>%
+    select(-price, -PID, -Year.Built, -Year.Remod.Add, -Garage.Yr.Blt, -outlier,
+           -Overall.Cond, -Bsmt.Cond, -Bsmt.Exposure, -BsmtFin.Type.1, -BsmtFin.SF.1,
+           -BsmtFin.Type.2, BsmtFin.SF.2, -Bsmt.Unf.SF, -Total.Bsmt.SF,
+           -Exter.Qual, -Pool.QC, -MS.SubClass, -X1st.Flr.SF, -X2nd.Flr.SF,
+           -Alley, -Lot.Frontage, -Land.Slope, -Condition.1, Condition.2, -Roof.Matl,
+           -Exterior.1st, -Exterior.2nd, -Heating, -Central.Air, -Electrical, -Functional,
+           -Garage.Cond, -Garage.Qual, -Misc.Feature)
+
+# re-run ANOVA and select best 20
+ames.lm <- lm(log.price ~ ., data = df_model2)
+ames_anova <- anova(ames.lm)
+ames_anova_tbl <- ames_anova %>%
+    rownames_to_column(var = "Variable") %>%
+    slice_min(`Pr(>F)`, n=20) %>%
+    arrange(`Pr(>F)`)
+
+# create subset with only those vars
+df_model2 <- df_model2 %>% select(log.price, all_of(ames_anova_tbl$Variable))
+
+# create initial BAS model
+model_final <- bas.lm(log.price ~ ., 
+                      data = df_model2,
+                      prior = "ZS-null", 
+                      modelprior = uniform(),
+                      n.models=1000
+)
+
+# Repeat HPM selection method until no more vars are eliminated
+repeat {
+
+    prior_n <- length(attributes(model_final$x)$names)
+    #use HPM to find best vars
+    model_final.HPM <- predict(model_final, estimator = "HPM")
+    # create vector of best vars and re-run BAS model selecting only those
+    model_final$postprobs[model_final.HPM$best]
+    HPM <- as.vector(which.matrix(model_final$which[model_final.HPM$best],
+                                 model_final$n.vars))
+    model_final <- bas.lm(log.price ~ ., data = df_model2,
+                            prior = "ZS-null",
+                            modelprior = uniform(),
+                            bestmodel = HPM, n.models = 1000)
+    if(prior_n == length(attributes(model_final$x)$names)){break}
+    
+}
+
+model_final <- bas.lm(log.price ~ ., data = df_model2,
+                      prior = "ZS-null",
+                      modelprior = uniform(),
+                      bestmodel = HPM, n.models = 1)
+
+predict.train.final <- predict(model_final, estimator = "HPM", se.fit = T)
+
+# final model R2
+model_final$R2
+coef(model_final, estimator="HPM")
 ```
 
-* * *
+------------------------------------------------------------------------
 
 ### Section 3.2 Transformation
 
-Did you decide to transform any variables?  Why or why not? Explain in a few sentences.
+Did you decide to transform any variables? Why or why not? Explain in a few sentences.
 
-* * *
+------------------------------------------------------------------------
 
-NOTE: Write your written response to section 3.2 here. Delete this note before you submit your work.
+Code for the Transformations can be found in the [Appendix]
 
-```{r model_assess}
-```
+**Factors** - the following factor variables incorrectly use the `NA` value to describe 'Not Applicable' or 'None':
 
-* * *
+-   `Alley, BsmtFin.Type.1, BsmtFin.Type.2, Bsmt.Qual, Bsmt.Cond, Bsmt.Exposure, Fireplace.Qu, Garage.Type, Garage.Finish,` `Mas.Vnr.Type, Garage.Qual, Garage.Cond, Pool.QC, Fence, Misc.Feature`
+
+Each of these has been re-factored to convert `NA`'s to "None" to include the rows in regression.
+
+Utilities has only one level and is dropped from the dataset.
+
+Year sold, month sold and PID are dropped as they have no value in predicting prices.
+
+1 in 7 observations are missing `Lot.Frontage`. This variable has a strong linear relationship with `Lot.Area`. For the sake of model exploration, the NA values are replaced with a value calculated by lot area. It's not used in the final model due to it's uncertainty and collinearity with `Lot.Area`.
+
+`Mas.Vnr.Area` relates to Masonry veneer. Those that had `NA` and veneer type `None` are set to 0.
+
+In the training data, a `BAS::Bayes.outlier` found 3 outliers for sales price at over 97.5% probability which were removed. No outliers were found in the test data.
+
+In the test model, log of `Lot.Area` and `area` were used. In the final, they proved to be more significant without their log forms.
+
+`Year.Built` and `Year.Remod.Add` were both converted to years before 2011 (i.e. *2011 - x*). The logs of both of these values were used in the final model as influence of age difference decreases with increasing age.
+
+The log of `price` is used throughout although for converted back for residual analysis.
+
+A few observations in the test data with factors that have no observations in the training data needed to be removed for the final fit. The limitations of `BAS` linear models with factors is that unused factors are dropped from the model, so it has no idea how to deal with them and throws an error.
+
+Sales not classified as "Normal" were removed from the training data before building the final model. We are predicting prices under normal sales conditions. Many of the non-normal sales types had highly irregular sales prices. Removing these improved the accuracy of the model significantly. 163 rows were removed.
+
+------------------------------------------------------------------------
 
 ### Section 3.3 Variable Interaction
 
 Did you decide to include any variable interactions? Why or why not? Explain in a few sentences.
 
-* * *
+------------------------------------------------------------------------
 
-NOTE: Write your written response to section 3.3 here. Delete this note before you submit your work.
+No variable interaction used.
+
+Variables were selected that were low in correlation. A first visual scan removed most of these, however some aliases were found still. Subsetting the data to just the top 20 on the ANOVA table got rid of the aliases and produces $GVIF^{(1/(2*Df))}$ of 2 or less. Due to this, no variable interaction necessary.
 
 ```{r model_inter}
+# deselecting obvious variables related to others, generally those found higher on the ANOVA were kept, 
+# the co-variables of those dropped
+df_corr <- df_train %>%
+    mutate(log.price = log(price)) %>%
+    select(-price, -PID, -Year.Built, -Year.Remod.Add, -Garage.Yr.Blt, -outlier,
+           -Overall.Cond, -Bsmt.Cond, -Bsmt.Exposure, -BsmtFin.Type.1, -BsmtFin.SF.1,
+           -BsmtFin.Type.2, BsmtFin.SF.2, -Bsmt.Unf.SF, -Total.Bsmt.SF,
+           -Exter.Qual, -Pool.QC, -MS.SubClass, -X1st.Flr.SF, -X2nd.Flr.SF)
+
+# create lm, test for aliases - no VIF analysis possible while aliases exist
+ames.lm <- lm(log.price ~ ., data = df_corr)
+paste("Aliased variables:", attributes(alias(ames.lm)$Complete)$dimnames[[1]])
+
+# take list of top 20 of remaining variables on ANOVA 
+ames_anova <- anova(ames.lm)
+ames_anova_tbl <- ames_anova %>%
+    rownames_to_column(var = "Variable") %>%
+    slice_min(`Pr(>F)`, n=20) %>%
+    arrange(`Pr(>F)`)
+
+# Subset top 20 and check for aliases and GVIF analysis
+df_corr <- df_corr %>% select(log.price, all_of(ames_anova_tbl$Variable))
+ames.lm <- glm(log.price ~ ., data = df_corr)
+paste("Aliased variables:", attributes(alias(ames.lm)$Complete)$dimnames[[1]])
+as.data.frame(car::vif(ames.lm)) %>% arrange(desc(`GVIF^(1/(2*Df))`))
 ```
 
-* * *
+------------------------------------------------------------------------
 
 ### Section 3.4 Variable Selection
 
 What method did you use to select the variables you included? Why did you select the method you used? Explain in a few sentences.
 
-* * *
+------------------------------------------------------------------------
 
-NOTE: Write your written response to section 3.4 here. Delete this note before you submit your work.
+Starting with the full set of variables, I took a 3 phase backwards elimination approach:
 
-```{r model_select}
-```
+1.  Visually going through the variables and removing those that will be co-variants (e.g. the various basement fields) and those that won't be useful in prediction (`PID`, `Pool.Qual`, Year/Month Sold etc.).
+2.  Working through ANOVA outputs with VIF analysis to find optimum ANOVA score while eliminating high VIF scores to minimise collinearity.
+3.  Applying top 20 remaining variables determined by ANOVA score and iteratively applying HPM selection until no further variables were eliminated to create final model.
 
-* * *
+Final model selected the following variables:
+
+|            |              |           |              |              |             |           |               |                |            |
+|------------|--------------|-----------|--------------|--------------|-------------|-----------|---------------|----------------|------------|
+| area       | Neighborhood |  MS.Zoning| Overall.Qual | House.Style  | Lot.Shape   | Bldg.Type | Bsmt.Qual     | Bsmt.Full.Bath | Exter.Cond |
+| Foundation | Lot.Area     | Heating   | Lot.Config   | Kitchen.Qual | Garage.Cars | log.age   | log.remod.age | Paved.Drive    |            |
+| &nbsp;     |              |           |              |              |             |           |               |                |            |
+
+------------------------------------------------------------------------
 
 ### Section 3.5 Model Testing
 
 How did testing the model on out-of-sample data affect whether or how you changed your model? Explain in a few sentences.
 
-* * *
+------------------------------------------------------------------------
 
-NOTE: Write your written response to section 3.5 here. Delete this note before you submit your work.
+RMSE for the training data is lower than for the testing data, however not noticeably so - out-of-sample data will normally be larger than for the data it was modelled on, but only if the difference is large is it an indicator of a poorly fitting model. No further adjustments resulting from out-of-sample testing were required.
 
-```{r model_testing}
-```
+Prior to removing non-normal sales from the training data, this was the reverse and the RMSE was actually higher for the training data as the test (and validation) set includes only normal sales - the training data was producing large residuals from the non-normal observations.
 
-* * *
+After initial results, I went back to the creation of the final model and implemented a loop to keep applying BPM selection until no further variables were eliminated. This improved RMSE for both data sets.
+
+------------------------------------------------------------------------
 
 ## Part 4 Final Model Assessment
 
@@ -201,61 +1034,997 @@ NOTE: Write your written response to section 3.5 here. Delete this note before y
 
 For your final model, create and briefly interpret an informative plot of the residuals.
 
-* * *
+------------------------------------------------------------------------
 
-NOTE: Write your written response to section 4.1 here. Delete this note before you submit your work.
+Four plots relating to residuals are shown below:
 
-* * *
+1.  The first pair plot the residuals for each observed price (train and test data sets). Left is the full data set, right is cropped to remove the most extreme 1% values from either ends of the axes. It shows there are fewer extreme errors than the initial model. Test performs better for higher priced houses (higher than \$400K) than Train though this can also be put down to lack of data points in this range. Both deteriorate rapidly for houses more than 1 standard deviation below the mean price. Test data looks to be consistently over-predicting house prices across the IQR (residual is observation minus prediction, negative residual indicates predicted is greater than observed).
+2.  The second pair (full and cropped as per #1) show residuals as a proportion of the observed price. This shows that, proportional to house price, the model performs relatively well for all but lower price houses and shows the lower price deterioration more clearly.
+3.  Histogram of residuals shows distributions that are peaked with long tails. Note, this graph is clipped to only show residuals of up to \$100K in either direction.
+4.  The QQ plot indicates a distribution that is both peaked and leptokurtic (fat-tailed, from the more extreme residuals).
+
+------------------------------------------------------------------------
+
+```{r plot_final_resid, echo=FALSE, fig.height=6, fig.width=10, message=FALSE, warning=FALSE}
+# bas drops empty levels from model
+df_final_test <- df_test %>%
+    filter(Foundation != "Wood") %>%
+    filter(Exter.Cond != "Po")
+
+predict.train.final <- predict(model_final, newdata = df_train, estimator = "HPM", se.fit = T)
+predict.test.final <- predict(model_final, newdata = df_final_test, estimator = "HPM", se.fit = T)
+
+z_score <- function(log.prices){
+    predicts <- exp(log.prices)
+    mu_train <- mean(predicts)
+    sd_train <- sd(predicts)
+    (predicts - mu_train)/sd_train
+}
+
+residuals.final <- tibble(
+        Data = "Train",
+        Observed = df_train$price/1e5,
+        Predicted = as.numeric(predict.train.final$Ypred[1,]),
+        Z_Score = z_score(predict.train.final$Ypred)[1,]
+    ) %>%
+    add_row(
+        Data = "Test",
+        Observed = df_final_test$price/1e5,
+        Predicted = as.numeric(predict.test.final$Ypred[1,]),
+        Z_Score = z_score(predict.test.final$Ypred)[1,]
+    ) %>%
+    mutate(Predicted = exp(Predicted)/1e5) %>%
+    mutate(Residual = Observed - Predicted) 
+
+price98 <- c(quantile(residuals.final$Observed, .01), quantile(residuals.final$Observed, .99))
+res98 <- c(quantile(residuals.final$Residual, .01), quantile(residuals.final$Residual, .99))
+observed.mu = mean(residuals.final$Observed)
+observed.sd = sd(residuals.final$Observed)
+
+
+g_final_res <- residuals.final %>%
+    ggplot(aes(x = Observed, y = Residual, colour=Data)) +
+    geom_vline(xintercept = observed.mu, linetype="longdash", alpha=0.5) +
+    geom_vline(xintercept = observed.mu-observed.sd, linetype="dotted", alpha=0.4, size=1) +
+    geom_vline(xintercept = observed.mu+observed.sd, linetype="dotted", alpha=0.4, size=1) +
+    geom_point(alpha = 0.5, size=1) +
+    geom_smooth(se = F, size = 1.5) +
+    theme_minimal() +
+    geom_hline(yintercept = 0) +
+    scale_colour_manual(values=c("#33A02B", "#67a9d5")) +
+    theme(plot.title = element_text(hjust = 0.5), plot.margin = margin(20,10,10,10)) +
+    labs(
+        title = "Residual Values for Final Model for Train and Test Data ($'00,000)",
+    ) + 
+    ylab("Residual") + xlab("Observed") 
+
+g_final_res_prop <- residuals.final %>%
+    ggplot(aes(x = Observed, y = Residual/Observed, colour=Data)) +
+    geom_vline(xintercept = observed.mu, linetype="longdash", alpha=0.5) +
+    geom_vline(xintercept = observed.mu-observed.sd, linetype="dotted", alpha=0.4, size=1) +
+    geom_vline(xintercept = observed.mu+observed.sd, linetype="dotted", alpha=0.4, size=1) +
+    geom_point(alpha = 0.5, size=1) +
+    geom_smooth(se = F, size = 1.5) +
+    theme_minimal() +
+    geom_hline(yintercept = 0) +
+    scale_colour_manual(values=c("#33A02B", "#67a9d5")) +
+    theme(plot.title = element_text(hjust = 0.5), plot.margin = margin(20,10,10,10)) +
+    labs(
+        title = "Final Model Residual Values as Proportion of Observed Values",
+    ) + 
+    ylab("Residual/Observed") + xlab("Observed ($'00,000)") 
+
+hist_res_final <- residuals.final %>%
+    ggplot(aes(x=Residual, fill=Data, colour=Data)) +
+    geom_histogram(
+        alpha = 0.3, 
+        bins = 30, 
+        aes(y = stat(density)),
+        position="identity", 
+        col="darkgrey"
+    ) +
+    geom_vline(
+        aes(xintercept = median(Residual[Data=="Test"]), color="Test"), 
+        size = 1.2, 
+        linetype="longdash"
+    ) + 
+    geom_vline(
+        aes(xintercept = median(Residual[Data=="Train"]), color="Train"), 
+        size = 1.2, 
+        linetype="longdash"
+    ) + 
+    stat_function(
+        fun = dnorm, 
+        aes(colour = "Normal"), 
+        size = 1.2, 
+        linetype="longdash",
+        args = list(
+            mean = residual.mu, 
+            sd = residual.sd
+        )
+    ) +
+    geom_line(
+        aes(y = ..density.., colour = Data), 
+        stat = 'density', 
+        size = 1.5
+    ) + 
+    theme_minimal() +
+    scale_fill_manual(values=c("Test" = "#33A02B", "Train" = "#1F78B4")) +
+    scale_colour_manual(name="Density", values = c("Normal" = "#E3211C", "Test" = "#33A02B", "Train" = "#1F78B4")) + 
+    theme(plot.title = element_text(hjust = 0.5), legend.position="bottom") +
+    labs(title = "Distribution of Residuals Using Final Model", y = "Density", x="Residual ($'00,000)") + 
+    coord_cartesian(xlim=c(-1,1)) 
+
+qq_res_final <- residuals.final %>% ggplot(aes(colour=Data)) +
+    geom_qq(aes(sample = Residual/Z_Score), alpha = 0.4) +
+    scale_color_manual(values=c("Test" = "#33A02B", "Train" = "#1F78B4")) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5), legend.position="bottom") +
+    labs(title = "QQ-Plot of Standardised Residuals") + 
+    labs(x = "Theoretical quantiles", y = "Standardized residuals") + 
+    coord_cartesian(ylim=c(-7.5,7.5), xlim=c(-3,3)) 
+ 
+```
+
+::: columns
+::: {.column width="49%"}
+```{r g_final_res, echo=FALSE, message=FALSE, warning=FALSE}
+g_final_res
+```
+:::
+
+::: {.column width="2%"}
+ 
+:::
+
+::: {.column width="49%"}
+```{r g_final_res_zoom, echo=FALSE, message=FALSE, warning=FALSE}
+g_final_res + coord_cartesian(xlim=price98, ylim =c(-0.5,0.5)) +
+    labs(
+        caption = "Axes cropped to show middle 98% of test data in both directions."
+    )
+```
+:::
+:::
+
+::: columns
+::: {.column width="49%"}
+```{r g_final_res_prop, echo=FALSE, message=FALSE, warning=FALSE}
+g_final_res_prop
+```
+:::
+
+::: {.column width="2%"}
+ 
+:::
+
+::: {.column width="49%"}
+```{r g_final_res_prop_zoom, echo=FALSE, message=FALSE, warning=FALSE}
+g_final_res_prop + coord_cartesian(xlim=price98, ylim =c(-0.5,0.5)) +
+    labs(
+        caption = "Axes cropped to show middle 98% of test data in both directions."
+    )
+```
+:::
+:::
+
+::: columns
+::: {.column width="49%"}
+```{r g_hist_res_final, echo=FALSE, message=FALSE, warning=FALSE}
+hist_res_final
+
+```
+:::
+
+::: {.column width="2%"}
+ 
+:::
+
+::: {.column width="49%"}
+```{r g_qq_res_final, echo=FALSE}
+qq_res_final
+
+```
+:::
+:::
+
+------------------------------------------------------------------------
 
 ### Section 4.2 Final Model RMSE
 
 For your final model, calculate and briefly comment on the RMSE.
 
-* * *
+------------------------------------------------------------------------
 
-NOTE: Write your written response to section 4.2 here. Delete this note before you submit your work.
+RMSE for Train is approximately 10% lower than for Test (\$18,515 vs \$20,282). This suggests that overfitting is not a problem for the final model.
 
-* * *
+The initial model has an RMSE of \$22,506 and \$24,044 for the Test & Train data sets, the final model is a considerable improvement.
+
+------------------------------------------------------------------------
+
+```{r final_rmse}
+residuals.final %>%
+    group_by(Data) %>%
+    summarise(RMSE = dollar_format()(sqrt(mean((Residual*1e5)^2)))) %>%
+    kbl() %>% kable_styling(bootstrap_options = "condensed", full_width = F, position = "left")
+```
+
+------------------------------------------------------------------------
 
 ### Section 4.3 Final Model Evaluation
 
 What are some strengths and weaknesses of your model?
 
-* * *
+------------------------------------------------------------------------
 
-NOTE: Write your written response to section 4.3 here. Delete this note before you submit your work.
+**Strengths:**
 
-* * *
+-   Final RMSE is lower than the initial model indicating it is a better fit to both sets of data.
+-   The high posterior probability of the final BMA model is a very good indication of the strength of the model chosen.
+-   The model performs reasonably well over the IQR.
+
+**Weaknesses:**
+
+-   The model suffers from a one-size-fits-all approach. We're attempting to force a linear model across the entire price range where relationships are not necessarily uniform across the price spectrum, and variables have changing significance across that range. This could be improved by splitting the datasets at (say) \$350,000 and creating two models, possibly a third for houses valued less than \$100,000.
+-   Outside of the IQR, the model increasingly undervalues lower priced houses, and overvalues higher priced houses.
+-   The scale of residual error can be quite large. At the median, house prices predictions can be in error by up to 25% and by up to almost 80% at the lower extreme of prices.
+-   While the goal of the model is to predict prices under normal sale conditions, it couldn't be used for cases where sale conditions were not normal. A separate model for those conditions would need to be built.
+-   The `bas.lm()` function drops factor levels for those levels where there is no data. When predicting with new data sets that contain data in those dropped levels, the method fails with an error. This is quite a limitation as those observations need to be filtered out and cannot be predicted. They would need to be added to the training data and the model recalibrated in order to include in future predictions. This causes an issue where prior predictions are no longer equitable with new predictions.
+
+------------------------------------------------------------------------
 
 ### Section 4.4 Final Model Validation
 
-Testing your final model on a separate, validation data set is a great way to determine how your model will perform in real-life practice. 
+Testing your final model on a separate, validation data set is a great way to determine how your model will perform in real-life practice.
 
-You will use the “ames_validation” dataset to do some additional assessment of your final model. Discuss your findings, be sure to mention:
-* What is the RMSE of your final model when applied to the validation data?  
-* How does this value compare to that of the training data and/or testing data?
-* What percentage of the 95% predictive confidence (or credible) intervals contain the true price of the house in the validation data set?  
-* From this result, does your final model properly reflect uncertainty?
+You will use the "ames_validation" dataset to do some additional assessment of your final model. Discuss your findings, be sure to mention: \* What is the RMSE of your final model when applied to the validation data?\
+\* How does this value compare to that of the training data and/or testing data? \* What percentage of the 95% predictive confidence (or credible) intervals contain the true price of the house in the validation data set?\
+\* From this result, does your final model properly reflect uncertainty?
 
 ```{r loadvalidation, message = FALSE}
 load("ames_validation.Rdata")
 ```
 
-* * *
+------------------------------------------------------------------------
 
-NOTE: Write your written response to section 4.4 here. Delete this note before you submit your work.
+RMSE for the Validation data is \$19,258, compared with \$18,235 & \$21,120 for Train and Test. Validation performs better than Test in this respect.
 
-```{r model_validate}
+93.48% of predictions for the validation data set lie in the 95% confidence level. With this result, the model would be rejected and go back for more work. The figures for Train & Test are 95.80% & 92.72% respectively.
+
+```{r transform_validate, message=FALSE, warning=FALSE, include=FALSE}
+df_validation <- ames_validation %>%
+    mutate_at(
+        vars(Alley, BsmtFin.Type.1, BsmtFin.Type.2, Bsmt.Qual, Bsmt.Cond, Bsmt.Exposure,
+             Fireplace.Qu, Garage.Type, Garage.Finish, Mas.Vnr.Type,
+             Garage.Qual, Garage.Cond, Pool.QC, Fence, Misc.Feature), 
+        replace_factor_na
+    ) %>%
+    mutate(log.age = log(2011 - Year.Built)) %>%
+    mutate(log.remod.age = log(2011 - Year.Remod.Add))
+
+# drop utilities & sale.condition, only one value in whole db
+df_validation <- df_validation %>% select(-Utilities, -Sale.Condition)
+
+# drop month/year sold - doesn't help predict a sale value unless using it to adjust sale price
+df_validation <- df_validation %>% select(-Yr.Sold, -Mo.Sold)
+
+#deal with continuous na's 
+
+# 48 observations miss garage age  due to not having a garage
+# for purposes of EDA, assume those values are the same as house age
+# revisit if garage age is significant influencer
+df_validation <- df_validation %>%
+    mutate(Garage.Yr.Blt = ifelse(is.na(Garage.Yr.Blt), Year.Built, Garage.Yr.Blt))
+
+# 1 in 7 are missing Lot.Frontage - EDA, found that
+# RLot.Frontage looks to be significant influencer
+# => strong liner relationship between area and frontage found (after removing outliers)
+# => replace NAs with calculated value from area
+# <30,000 represents roughly 98% of values
+
+df_validation <- df_validation %>%
+    mutate(Lot.Frontage = ifelse(is.na(Lot.Frontage), calc_frontage(Lot.Area), Lot.Frontage))
+
+# Mas.Vnr.Area relates to Masonry veneer. Those that have none will have 0.
+df_validation <- df_validation  %>%
+    replace_na(list(Mas.Vnr.Area=0))
+
+df_validation <- df_validation  %>%
+    replace(is.na(.), 0)
+
+# Perform a basic ANOVA to find influencers to use on outlier validation
+ames.lm <- lm(log(price) ~ ., data = df_validation)
+ames_anova <- anova(ames.lm)
+potential_vars <- (
+    ames_anova %>%
+        rownames_to_column(var = "Variable") %>%
+        slice_max(`Pr(>F)`, n=10) 
+)$Variable
+
+n <- nrow(df_validation)
+ames_k <- qnorm(0.5 + 0.5 * 0.95 ^ (1 / n))
+ames.lm <- lm(log(price) ~ ., data = (df_validation %>% select(price, all_of(potential_vars))))
+outliers <- BAS::Bayes.outlier(ames.lm, k = ames_k)
+head(sort(outliers$prob.outlier, decreasing=TRUE), 5)
+
+# 3 observations can be counted as outlier
+df_validation$outlier = outliers$prob.outlier
+
+#remove outliers from training dataset
+df_validation <- df_validation %>%
+    filter(!(PID %in% (df_train %>% filter(outlier>0.975))$PID))
+
+# remove unknown factor levels
+df_final_validation <- df_validation  %>%
+    filter(Foundation != "Wood") %>%
+    filter(MS.Zoning != "A (agr)") %>%
+    filter(House.Style != "2.5Fin") %>%
+    filter(Heating != "Floor") %>%
+    filter(!(Exterior.1st %in% c("CBlock", "PreCast")))
 ```
 
-* * *
+```{r model_validate}
+predict.validation.final <- predict(
+    model_final, 
+    newdata = df_final_validation, 
+    estimator = "HPM", se.fit = T)
+```
+
+```{r plot_validate_residuals, echo=FALSE, fig.height=6, fig.width=10, message=FALSE, warning=FALSE}
+residuals.validation <- tibble(
+        Data = "Validation",
+        Observed = df_final_validation$price/1e5,
+        Predicted = as.numeric(predict.validation.final$Ypred[1,]),
+        Z_Score = z_score(predict.validation.final$Ypred)[1,]
+    ) %>%
+    mutate(Predicted = exp(Predicted)/1e5) %>%
+    mutate(Residual = Observed - Predicted)
+
+residuals.final.validation <- rbind(residuals.final, residuals.validation)
+
+price98 <- c(quantile(residuals.validation$Observed, .01), quantile(residuals.validation$Observed, .99))
+res98 <- c(quantile(residuals.validation$Residual, .01), quantile(residuals.validation$Residual, .99))
+observed.mu = mean(residuals.validation$Observed)
+observed.sd = sd(residuals.validation$Observed)
+
+residuals.final.validation %>%
+    ggplot(aes(x = Observed, y = Residual/Observed, colour=Data)) +
+    geom_vline(xintercept = observed.mu, linetype="longdash", alpha=0.5) +
+    geom_vline(xintercept = observed.mu-observed.sd, linetype="dotted", alpha=0.4, size=1) +
+    geom_vline(xintercept = observed.mu+observed.sd, linetype="dotted", alpha=0.4, size=1) +
+    geom_point(alpha = 0.6, size=2) +
+    geom_smooth(se = F, size = 1.5) +
+    theme_minimal() +
+    geom_hline(yintercept = 0) +
+    scale_colour_manual(values=c("#33A02B", "#67a9d5", "orange")) +
+    theme(plot.title = element_text(hjust = 0.5), plot.margin = margin(20,10,10,10)) +
+    labs(
+        title = "Residual Values for All Data Sets as proportion of Observed ($'00,000)",
+    ) + 
+    ylab("Residual") + xlab("Observed") + coord_cartesian(xlim=price98, ylim = c(-0.5,0.5)) +
+    labs(
+        caption = "Axes cropped to show middle 98% of test data in both directions.
+        Vertical Lines are mean and plus/minus one standard devation for the Validation Data only."
+    )
+
+```
+
+```{r validate_summary}
+residuals.final.validation %>%
+    group_by(Data) %>%
+    summarise(RMSE = dollar_format()(sqrt(mean((Residual*1e5)^2)))) %>%
+    kbl() %>% kable_styling(bootstrap_options = "condensed", full_width = F, position = "left")
+
+train.confint <- exp(confint(predict.train.final, parm = "pred"))/1e5
+test.confint <- exp(confint(predict.test.final, parm = "pred"))/1e5
+validation.confint <- exp(confint(predict.validation.final, parm = "pred"))/1e5
+all_confints <- as.data.frame(Data = "Train", train.confint[,]) %>%
+    add_row(
+        as.data.frame(Data = "Test", test.confint[,])
+    ) %>%
+    add_row(
+        as.data.frame(Data = "Validation", validation.confint[,])
+    ) 
+    
+cbind(residuals.final.validation, all_confints) %>% 
+    mutate(in_ci = ifelse(Observed >= `2.5%` & Observed <= `97.5%`,TRUE,FALSE)) %>% 
+    group_by(Data) %>%
+    summarize(`% in CI` = round(mean(in_ci)*100,2)) %>%
+    kbl() %>% kable_styling(bootstrap_options = "condensed", full_width = F, position = "left")
+
+```
+
+------------------------------------------------------------------------
 
 ## Part 5 Conclusion
 
-Provide a brief summary of your results, and a brief discussion of what you have learned about the data and your model. 
+------------------------------------------------------------------------
 
-* * *
+Overall, using Bayesian Inference methods with the Highest Probability Model, the model provides a good prediction of models for most of the data, however the tails (particularly the lower tail) perform poorly when considering the residual as a proportion of the observed data.
 
-NOTE: Write your written response to part 5 here. Delete this note before you submit your work.
+While the Training data fits 95.8% of data within the 95% confidence interval, out-of-sample fitted data didn't quite meet the 95% threshold indicating the model needs a bit more work to see if this could be met.
 
-* * *
+The model suffers from a one-size-fits-all approach. We're attempting to force a linear model across the entire price range where relationships are not necessarily uniform across the price spectrum, and variables have changing significance across that range. This could be improved by splitting the datasets at (say) \$350,000 and creating two models, possibly a third for houses valued less than \$100,000.
+
+Lessons learnt in this exercise:
+
+-   It's important to think of the goal for the model and only include data in the training that is relevant to that goal. For this reason, non-normal sale condition data was omitted from training the model.
+-   Missing data needs to be considered and dealt with appropriately. Many of the categorical variables used `NA` to indicate 'None' or 'Not Applicable', which are very different things. Converting `NA`'s in these categories enabled a much bigger data set to be included in training. Similarly, converting `NA`'s to zero in the continuous columns that relate to these 'Not Applicable' cases kept a much larger training set.
+-   Sometimes, where the influence of variables change considerably across the spectrum of data, a modelling problem may need to be split into sections. In this case, what drives a house price in the lower end of the sector is not necessarily relevant in the higher end and vice versa.
+-   Prediction is better where there is the bulk of the mass, tails are not so reliable.
+-   Elimination of collinear variables makes a large impact on the accuracy of the data, as does removing variables with little information that may be incorrectly identified as significant factors by modelling algorithms.
+-   EDA showed stronger linear relationships between log of price and the logs of area and Lot.Area, however during model variable selection, applying the log of both of these significantly decreased their influence. Always test before and after log before assuming the EDA is applicable.
+
+------------------------------------------------------------------------
+
+# Appendix
+
+## Code Blocks
+
+The following code blocks were used but not displayed inline.
+
+### Graphs in Part 1 EDA:
+
+```{r eval=FALSE}
+df_log.age <- data.frame(age = log(2011- ames_train$Year.Built)) 
+log.age.mu = mean(df_log.age$age)
+log.age.sd = sd(df_log.age$age)
+
+plot_age <- df_log.age %>% 
+    ggplot(aes(x=age)) +
+    geom_histogram(
+        alpha = 0.8, 
+        bins = 30, 
+        aes(y = stat(density, ..scaled..)),
+        position="identity", 
+        fill="orange", 
+        col="darkgrey") +
+    stat_function(
+        fun = dnorm, 
+        aes(colour = "Normal"), 
+        size = 1.2, 
+        alpha = 0.6,
+        args = list(
+            mean = log.age.mu, 
+            sd = log.age.sd
+            )
+        ) +
+    geom_line(
+        aes(y = ..density.., colour = "Observed"), 
+        stat = 'density', 
+        size = 1.5, 
+        alpha = 0.8) + 
+    theme_minimal() +
+    scale_color_manual(name="Distribution", values=c(Normal="blue", Observed="red")) +
+    theme(plot.title = element_text(hjust = 0.5), legend.position="bottom") +
+    labs(title = "Distribution of Log of House Age at 2011", y = "Density", x="Log of House Age")
+
+nei_colours <- colorRampPalette(brewer.pal(4, "Set1"))(27)
+
+plot_price_year <- ames_train %>% 
+    group_by(Neighborhood, Yr.Sold) %>%
+    summarise(Med = median(log(price)))  %>%   
+    ggplot(aes(x=Yr.Sold, y=Med, colour=Neighborhood)) +
+    geom_line(alpha = 0.8, size=1) +
+    theme_minimal() +
+    scale_color_manual(values = nei_colours)  +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    labs(
+        title = "Change in House Sales Prices by Year and Neighbourhood", 
+        y = "Log of Sales Price", 
+        x="Year"
+        )
+    
+# Calculate CV for each neighbourhood, create factor in descending order of CV 
+neighbourhood_price_variation <- ames_train %>% 
+    group_by(Neighborhood) %>% 
+    summarise(
+        Mean = mean(price)/1e5, 
+        SD = sd(price)/1e5
+        ) %>%
+    mutate(CV = SD/Mean) %>%
+    arrange(desc(CV)) %>%
+    mutate(Neighborhood = factor(Neighborhood, unique(Neighborhood))) %>%
+    arrange(desc(Neighborhood))
+
+nei_plot <- ames_train %>% 
+    select(Neighborhood, price) %>%
+    mutate(Neighborhood = factor(Neighborhood, neighbourhood_price_variation$Neighborhood)) %>% 
+    ggplot(aes(as.factor(Neighborhood), price/1e5), fill=Neighborhood) +
+    theme_minimal() +
+    geom_boxplot(aes(fill=Neighborhood)) +
+    geom_violin(aes(colour=Neighborhood), width=1.5, alpha=0.3) + 
+    coord_flip() +
+    theme(
+        plot.title = element_text(hjust = 0.5), 
+        legend.position="none", 
+        plot.caption = element_text(face="italic")
+    ) +
+    scale_color_manual(values = nei_colours) +
+    labs(
+        title = "Distribution of House Prices by Neighbourhood", 
+        caption = "Neighbourhoods listed in descending order of coefficient of variability",
+        x = NULL, 
+        y="Price ($'00,000)"
+    )
+
+```
+
+### Transforming the Ames data
+
+```{r eval=FALSE}
+# deal with factor NAs (either NA or empty string) - replace with 'NONE'
+replace_factor_na <- function(x){
+    x <- as.character(x)
+    x <- if_else((is.na(x) | (x=="")), 'NONE', x)
+    x <- as.factor(x)
+}
+df_train <- ames_train %>%
+    mutate_at(
+        vars(Alley, BsmtFin.Type.1, BsmtFin.Type.2, Bsmt.Qual, Bsmt.Cond, Bsmt.Exposure,
+             Fireplace.Qu, Garage.Type, Garage.Finish, Mas.Vnr.Type,
+             Garage.Qual, Garage.Cond, Pool.QC, Fence, Misc.Feature), 
+        replace_factor_na
+    ) 
+
+# drop month/year sold - doesn't help predict a sale value unless using it to adjust sale price
+df_train <- df_train %>% select(-Yr.Sold, -Mo.Sold)
+
+# drop utilities, only one value in whole db
+df_train <- df_train %>% select(-Utilities)
+
+#deal with continuous na's 
+
+# 48 observations miss garage age  due to not having a garage
+# for purposes of EDA, assume those values are the same as house age
+# revisit if garage age is significant influencer
+df_train <- df_train %>%
+    mutate(Garage.Yr.Blt = ifelse(is.na(Garage.Yr.Blt), Year.Built, Garage.Yr.Blt))
+
+# 1 in 7 are missing Lot.Frontage - EDA, found that
+# RLot.Frontage looks to be significant influencer
+# => strong liner relationship between area and frontage found (after removing outliers)
+# => replace NAs with calculated value from area
+# <30,000 represents roughly 98% of values
+df_train %>%
+    filter(Lot.Frontage>0 & Lot.Area<30000) %>%
+    ggplot(aes(x=Lot.Area, y=Lot.Frontage)) +
+    geom_point() +
+    geom_smooth(method = "lm")
+
+# find slope (given by covariance) and intercept
+slope <- function(x, y){
+    return(cov(x, y)/var(x))
+}
+
+intercept <- function(x, y, m){
+    b <- mean(y) - (m * mean(x))
+    return(b)
+}
+
+lf.parameters <- df_train %>%
+    filter(Lot.Frontage>0 & Lot.Area<30000) %>%
+    summarise(
+        slope = slope(Lot.Area, Lot.Frontage),
+        intercept = intercept(Lot.Area, Lot.Frontage, slope)
+    )
+
+# confirm with lm()
+lot.frontage.lm <- lm(Lot.Area ~ Lot.Frontage, 
+                      data = (df_train %>% filter(Lot.Frontage>0 & Lot.Area<20000)))
+summary(lot.frontage.lm)
+
+calc_frontage <- function(LotArea) {
+    lf.parameters$intercept + lf.parameters$slope * LotArea
+}
+
+df_train <- df_train %>%
+    mutate(Lot.Frontage = ifelse(is.na(Lot.Frontage), calc_frontage(Lot.Area), Lot.Frontage))
+
+# Mas.Vnr.Area relates to Masonry veneer. Those that have none will have 0.
+df_train <- df_train  %>%
+    replace_na(list(Mas.Vnr.Area=0))
+
+# Only two observations remain with NAs - for the sake of EDA, set these to 0 also
+df_train <- df_train  %>%
+    replace(is.na(.), 0)
+
+# Perform a basic ANOVA to find influencers to use on outlier test
+ames.lm <- lm(log(price) ~ ., data = df_train)
+ames_anova <- anova(ames.lm)
+potential_vars <- (
+        ames_anova %>%
+            rownames_to_column(var = "Variable") %>%
+            slice_max(`Pr(>F)`, n=10) 
+    )$Variable
+
+n <- nrow(df_train)
+ames_k <- qnorm(0.5 + 0.5 * 0.95 ^ (1 / n))
+ames.lm <- lm(log(price) ~ ., data = (df_train %>% select(price, all_of(potential_vars))))
+outliers <- BAS::Bayes.outlier(ames.lm, k = ames_k)
+head(sort(outliers$prob.outlier, decreasing=TRUE), 5)
+
+# 3 observations can be counted as outlier
+df_train$outlier = outliers$prob.outlier
+
+df_train %>%
+    filter(outlier>0.975) %>%
+    select(PID, price, Year.Built, Year.Remod.Add, area, Overall.Cond, Exterior.1st, 
+           Exter.Cond, Bsmt.Cond, BsmtFin.Type.1, Central.Air, Garage.Cond, Sale.Condition) %>%
+    kbl() %>% kable_styling(bootstrap_options = c("condensed"), font_size = 10)
+
+#remove outliers from training dataset
+df_train <- df_train %>%
+    filter(!(PID %in% (df_train %>% filter(outlier>0.975))$PID))
+
+# filter sale.condition on normal then drop, only one value in whole db
+df_train <- df_train %>% 
+    filter(Sale.Condition == "Normal") %>%
+    select(-Sale.Condition)
+
+```
+
+Test and Validate data sets are similarly transformed.
+
+### Section 2.3 Plotting Residuals
+
+```{r eval=FALSE}
+residuals <- tibble(
+    Observed = df_train$price/1e5,
+    Predicted.HPM = as.numeric(bas_ames.ZS.HPM$Ypred[1,]),
+    Predicted.BIC = as.numeric(ames.lm.BIC1$fitted.values),
+    Predicted.Lasso = as.numeric(ames.lasso.pred)
+    ) %>%
+    mutate(Predicted.HPM = exp(Predicted.HPM)/1e5) %>%
+    mutate(Predicted.BIC = exp(Predicted.BIC)/1e5) %>%
+    mutate(Predicted.Lasso = exp(Predicted.Lasso)/1e5) %>%
+    mutate(HPM = Observed - Predicted.HPM) %>%
+    mutate(BIC = Observed - Predicted.BIC)  %>% 
+    mutate(Lasso = Observed - Predicted.Lasso)  %>% 
+    pivot_longer(
+        cols = c(Lasso, BIC, HPM), 
+        values_to = "Residual", 
+        names_to = "Model"
+    ) %>% 
+    mutate(Model = factor(Model, levels = c("Lasso", "BIC", "HPM")))
+
+price.mu = mean(df_train$price)/1e5
+price.sd = sd(df_train$price)/1e5
+g_res <- residuals %>%
+    ggplot(aes(x = Observed, y = Residual, colour = Model)) +
+    geom_hline(yintercept = 0) +
+    geom_vline(xintercept = price.mu, linetype="longdash", alpha=0.5) +
+    geom_vline(xintercept = price.mu-price.sd, linetype="dotted", alpha=0.4, size=1) +
+    geom_vline(xintercept = price.mu+price.sd, linetype="dotted", alpha=0.4, size=1) +
+    geom_point(alpha = 0.3, size=2) +
+    geom_smooth(se = F, size = 1.2) +
+    theme_minimal() +
+    scale_color_manual(values = c("#80B1D3", "#B3DE69", "#FF7F00")) +
+    theme(
+        plot.title = element_text(hjust = 0.5), 
+        plot.margin = margin(20,10,10,10)
+        ) +
+    labs(
+        title = "Residual vs Observed Values for BIC and MPM Models ($'00,000)"
+    )
+
+residuals.train.HPM <- residuals %>% filter(Model=="HPM")
+price98 <- c(quantile(residuals.train.HPM$Observed, .01), quantile(residuals.train.HPM$Observed, .99))
+res98 <- c(quantile(residuals.train.HPM$Residual, .01), quantile(residuals.train.HPM$Residual, .99))
+
+g_res
+g_res + coord_cartesian(xlim=price98, ylim = res98) +
+    labs(
+        caption = "Axes cropped to show middle 98% of test data in both directions."
+    )
+
+```
+
+### Section 2.5 Summing and Plotting Residuals Test Data
+
+```{r eval=FALSE}
+residuals.intial <- tibble(
+    Data = "Train",
+    Observed = df_train$price/1e5,
+    Predicted = as.numeric(predict.train.initial$Ypred[1,])
+) %>%
+    add_row(
+        Data = "Test",
+        Observed = df_test$price/1e5,
+        Predicted = as.numeric(predict.test.initial$Ypred[1,])
+    ) %>%
+    mutate(Predicted = exp(Predicted)/1e5) %>%
+    mutate(Residual = Observed - Predicted) 
+
+residuals.intial <- tibble(
+    Data = "Train",
+    Observed = df_train$price/1e5,
+    Predicted = as.numeric(predict.train.initial$Ypred[1,])
+) %>%
+    add_row(
+        Data = "Test",
+        Observed = df_test$price/1e5,
+        Predicted = as.numeric(predict.test.initial$Ypred[1,])
+    ) %>%
+    mutate(Predicted = exp(Predicted)/1e5) %>%
+    mutate(Residual = Observed - Predicted) 
+
+residuals.intial %>% 
+    mutate(Residual = (Residual)*1e5) %>%
+    group_by(Data) %>%
+    summarise(
+        RMSE=sqrt(mean(Residual^2)),
+        mean=round(mean(abs(Residual)),2),
+        median=median(abs(Residual)), 
+        sd=round(sd(abs(Residual)),2),
+        max=max(abs(Residual)),
+        q25=quantile(abs(Residual), 0.25),
+        q75=quantile(abs(Residual),0.75),
+        skew=round(skewness(Residual),2)) %>%
+    mutate(across(RMSE:q75, dollar_format())) %>%
+    kbl(
+        caption = "<center><h4><strong>Distribution of Absolute Residuals</strong></h4></center>",
+        escape = F
+    ) %>% 
+    kable_styling(bootstrap_options = c("condensed"))
+
+test.price98 <- c(quantile(residuals.intial$Observed, .01), quantile(residuals.intial$Observed, .99))
+test.res98 <- c(quantile(residuals.intial$Residual, .01), quantile(residuals.intial$Residual, .99))
+
+g_test_res <- residuals.intial %>%
+    ggplot(aes(x = Observed, y = Residual, colour=Data)) +
+    geom_vline(xintercept = price.mu, linetype="longdash", alpha=0.5) +
+    geom_vline(xintercept = price.mu-price.sd, linetype="dotted", alpha=0.4, size=1) +
+    geom_vline(xintercept = price.mu+price.sd, linetype="dotted", alpha=0.4, size=1) +
+    geom_point(alpha = 0.6, size=2) +
+    geom_smooth(se = F, size = 1.5) +
+    theme_minimal() +
+    geom_hline(yintercept = 0) +
+    scale_colour_manual(values=c("#33A02B", "#67a9d5")) +
+    theme(plot.title = element_text(hjust = 0.5), plot.margin = margin(20,10,30,10)) +
+    labs(
+        title = "Residual Values for HPM Model for Train and Test Data ($'00,000)",
+    ) + 
+    ylab("Residual") + xlab("Observed") 
+
+g_test_res
+g_test_res + coord_cartesian(xlim=test.price98, ylim = test.res98) +
+    labs(
+        caption = "Axes cropped to show middle 98% of test data in both directions."
+    )
+
+residual.mu = mean(residuals.intial$Residual)
+residual.sd = sd(residuals.intial$Residual)
+test.res99 <- c(quantile(residuals.intial$Residual, .005), quantile(residuals.intial$Residual, .995))
+
+residuals.intial %>%
+    ggplot(aes(x=Residual, fill=Data, colour=Data)) +
+    geom_histogram(
+        alpha = 0.3, 
+        bins = 30, 
+        aes(y = stat(density)),
+        position="identity", 
+        col="darkgrey"
+        ) +
+    geom_vline(
+        aes(xintercept = median(Residual[Data=="Test"]), color="Test"), 
+        size = 1.2, 
+        linetype="longdash"
+    ) + 
+    geom_vline(
+        aes(xintercept = median(Residual[Data=="Train"]), color="Train"), 
+        size = 1.2, 
+        linetype="longdash"
+    ) + 
+    stat_function(
+        fun = dnorm, 
+        aes(colour = "Normal"), 
+        size = 1.2, 
+        linetype="longdash",
+        args = list(
+            mean = residual.mu, 
+            sd = residual.sd
+        )
+    ) +
+    geom_line(
+        aes(y = ..density.., colour = Data), 
+        stat = 'density', 
+        size = 1.5
+        ) + 
+    theme_minimal() +
+    scale_fill_manual(values=c("Test" = "#33A02B", "Train" = "#1F78B4")) +
+    scale_colour_manual(
+        name="Density", 
+        values = c("Normal" = "#E3211C", "Test" = "#33A02B", "Train" = "#1F78B4")
+        ) + 
+    theme(
+        plot.title = element_text(hjust = 0.5), 
+        legend.position="bottom"
+        ) +
+    labs(
+        title = "Distribution of Train and Test Residuals Using HPM", 
+        caption = "NOTE: the x-axis has been trunctated at $100K in both directions due to the excessive tails.
+        Verticals represent median residuals for both data sets.",
+        y = "Density", x="Residual ($'00,000)"
+        ) + 
+    coord_cartesian(xlim=c(-1,1)) 
+
+```
+
+### Section 4.1 - Plotting Residuals
+
+```{r eval=FALSE}
+# bas drops empty levels from model
+df_final_test <- df_test %>%
+    filter(Foundation != "Wood") %>%
+    filter(Exter.Cond != "Po")
+
+predict.train.final <- predict(model_final, newdata = df_train, estimator = "HPM", se.fit = T)
+predict.test.final <- predict(model_final, newdata = df_final_test, estimator = "HPM", se.fit = T)
+
+z_score <- function(log.prices){
+    predicts <- exp(log.prices)
+    mu_train <- mean(predicts)
+    sd_train <- sd(predicts)
+    (predicts - mu_train)/sd_train
+}
+
+residuals.final <- tibble(
+        Data = "Train",
+        Observed = df_train$price/1e5,
+        Predicted = as.numeric(predict.train.final$Ypred[1,]),
+        Z_Score = z_score(predict.train.final$Ypred)[1,]
+    ) %>%
+    add_row(
+        Data = "Test",
+        Observed = df_final_test$price/1e5,
+        Predicted = as.numeric(predict.test.final$Ypred[1,]),
+        Z_Score = z_score(predict.test.final$Ypred)[1,]
+    ) %>%
+    mutate(Predicted = exp(Predicted)/1e5) %>%
+    mutate(Residual = Observed - Predicted) 
+
+price98 <- c(quantile(residuals.final$Observed, .01), quantile(residuals.final$Observed, .99))
+res98 <- c(quantile(residuals.final$Residual, .01), quantile(residuals.final$Residual, .99))
+observed.mu = mean(residuals.final$Observed)
+observed.sd = sd(residuals.final$Observed)
+
+
+g_final_res <- residuals.final %>%
+    ggplot(aes(x = Observed, y = Residual, colour=Data)) +
+    geom_vline(xintercept = observed.mu, linetype="longdash", alpha=0.5) +
+    geom_vline(xintercept = observed.mu-observed.sd, linetype="dotted", alpha=0.4, size=1) +
+    geom_vline(xintercept = observed.mu+observed.sd, linetype="dotted", alpha=0.4, size=1) +
+    geom_point(alpha = 0.5, size=1) +
+    geom_smooth(se = F, size = 1.5) +
+    theme_minimal() +
+    geom_hline(yintercept = 0) +
+    scale_colour_manual(values=c("#33A02B", "#67a9d5")) +
+    theme(plot.title = element_text(hjust = 0.5), plot.margin = margin(20,10,10,10)) +
+    labs(
+        title = "Residual Values for Final Model for Train and Test Data ($'00,000)",
+    ) + 
+    ylab("Residual") + xlab("Observed") 
+
+g_final_res_prop <- residuals.final %>%
+    ggplot(aes(x = Observed, y = Residual/Observed, colour=Data)) +
+    geom_vline(xintercept = observed.mu, linetype="longdash", alpha=0.5) +
+    geom_vline(xintercept = observed.mu-observed.sd, linetype="dotted", alpha=0.4, size=1) +
+    geom_vline(xintercept = observed.mu+observed.sd, linetype="dotted", alpha=0.4, size=1) +
+    geom_point(alpha = 0.5, size=1) +
+    geom_smooth(se = F, size = 1.5) +
+    theme_minimal() +
+    geom_hline(yintercept = 0) +
+    scale_colour_manual(values=c("#33A02B", "#67a9d5")) +
+    theme(plot.title = element_text(hjust = 0.5), plot.margin = margin(20,10,10,10)) +
+    labs(
+        title = "Final Model Residual Values as Proportion of Observed Values",
+    ) + 
+    ylab("Residual/Observed") + xlab("Observed ($'00,000)") 
+
+hist_res_final <- residuals.final %>%
+    ggplot(aes(x=Residual, fill=Data, colour=Data)) +
+    geom_histogram(
+        alpha = 0.3, 
+        bins = 30, 
+        aes(y = stat(density)),
+        position="identity", 
+        col="darkgrey"
+    ) +
+    geom_vline(
+        aes(xintercept = median(Residual[Data=="Test"]), color="Test"), 
+        size = 1.2, 
+        linetype="longdash"
+    ) + 
+    geom_vline(
+        aes(xintercept = median(Residual[Data=="Train"]), color="Train"), 
+        size = 1.2, 
+        linetype="longdash"
+    ) + 
+    stat_function(
+        fun = dnorm, 
+        aes(colour = "Normal"), 
+        size = 1.2, 
+        linetype="longdash",
+        args = list(
+            mean = residual.mu, 
+            sd = residual.sd
+        )
+    ) +
+    geom_line(
+        aes(y = ..density.., colour = Data), 
+        stat = 'density', 
+        size = 1.5
+    ) + 
+    theme_minimal() +
+    scale_fill_manual(values=c("Test" = "#33A02B", "Train" = "#1F78B4")) +
+    scale_colour_manual(
+        name="Density", 
+        values = c("Normal" = "#E3211C", "Test" = "#33A02B", "Train" = "#1F78B4")
+        ) + 
+    theme(plot.title = element_text(hjust = 0.5), legend.position="bottom") +
+    labs(title = "Distribution of Residuals Using Final Model", y = "Density", x="Residual ($'00,000)") + 
+    coord_cartesian(xlim=c(-1,1)) 
+
+qq_res_final <- residuals.final %>% ggplot(aes(colour=Data)) +
+    geom_qq(aes(sample = Residual/Z_Score), alpha = 0.4) +
+    scale_color_manual(values=c("Test" = "#33A02B", "Train" = "#1F78B4")) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+    theme_minimal() +
+    theme(plot.title = element_text(hjust = 0.5), legend.position="bottom") +
+    labs(title = "QQ-Plot of Standardised Residuals") + 
+    labs(x = "Theoretical quantiles", y = "Standardized residuals") + 
+    coord_cartesian(ylim=c(-7.5,7.5), xlim=c(-3,3)) 
+ 
+```
+
+### Section 4.4: Plotting Validation Residuals
+
+```{r eval=FALSE}
+residuals.validation <- tibble(
+        Data = "Validation",
+        Observed = df_final_validation$price/1e5,
+        Predicted = as.numeric(predict.validation.final$Ypred[1,]),
+        Z_Score = z_score(predict.validation.final$Ypred)[1,]
+    ) %>%
+    mutate(Predicted = exp(Predicted)/1e5) %>%
+    mutate(Residual = Observed - Predicted)
+
+residuals.final.validation <- rbind(residuals.final, residuals.validation)
+
+price98 <- c(quantile(residuals.validation$Observed, .01), quantile(residuals.validation$Observed, .99))
+res98 <- c(quantile(residuals.validation$Residual, .01), quantile(residuals.validation$Residual, .99))
+observed.mu = mean(residuals.validation$Observed)
+observed.sd = sd(residuals.validation$Observed)
+
+residuals.final.validation %>%
+    ggplot(aes(x = Observed, y = Residual/Observed, colour=Data)) +
+    geom_vline(xintercept = observed.mu, linetype="longdash", alpha=0.5) +
+    geom_vline(xintercept = observed.mu-observed.sd, linetype="dotted", alpha=0.4, size=1) +
+    geom_vline(xintercept = observed.mu+observed.sd, linetype="dotted", alpha=0.4, size=1) +
+    geom_point(alpha = 0.6, size=2) +
+    geom_smooth(se = F, size = 1.5) +
+    theme_minimal() +
+    geom_hline(yintercept = 0) +
+    scale_colour_manual(values=c("#33A02B", "#67a9d5", "orange")) +
+    theme(plot.title = element_text(hjust = 0.5), plot.margin = margin(20,10,10,10)) +
+    labs(
+        title = "Residual Values for All Data Sets as proportion of Observed ($'00,000)",
+    ) + 
+    ylab("Residual") + xlab("Observed") + coord_cartesian(xlim=price98, ylim = c(-0.5,0.5)) +
+    labs(
+        caption = "Axes cropped to show middle 98% of test data in both directions.
+        Vertical Lines are mean and plus/minus one standard devation for the Validation Data only."
+    )
+
+```
+
+\
+
+------------------------------------------------------------------------
+
+\
+\
+\
+\
